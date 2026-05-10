@@ -1,0 +1,3 @@
+[submodule "playing-cards"]
+	path = playing-cards
+	url = https://github.com/hanhaechi/playing-cards

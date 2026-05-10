@@ -1,0 +1,260 @@
+/* === GLOBAL === */
+:root {
+    --card-width: 200px;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+img {
+    outline: 2px solid #333;
+    border-radius: 18px;
+}
+body {
+    background: #1a1a2e;
+    color: #e0d7c6;
+
+    font-family: 'Georgia', serif;
+    font-size: 4rem;
+    color: white;
+    text-shadow: 2px 2px 4px black, -1px -1px 3px black;
+
+    min-height: 100vh;
+}
+
+button {
+    font-size: inherit;
+    font-family: inherit;
+    text-shadow: inherit;
+}
+
+/* === RULES MODAL === */
+.Rules-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.7);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 9999;
+}
+
+.Rules-modal {
+    background: #16213e;
+    border: 1px solid #444;
+    border-radius: 10px;
+    padding: 32px 40px;
+    max-width: 700px;
+    width: 90%;
+    max-height: 80vh;
+    overflow-y: auto;
+    position: relative;
+    font-size: 1.5rem;
+}
+
+.Rules-modal h2 {
+    margin-bottom: 20px;
+    font-size: 2rem;
+    text-align: center;
+}
+
+.Rules-close {
+    position: absolute;
+    top: 12px;
+    right: 16px;
+    background: none;
+    border: none;
+    color: #e0d7c6;
+    font-size: 1.8rem;
+    cursor: pointer;
+    line-height: 1;
+}
+
+.Rules-body {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    line-height: 1.5;
+}
+
+/* === GAME === */
+.Game {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    min-height: 100vh;
+    padding: 20px;
+    gap: 20px;
+}
+
+/* === PLAY AREA === */
+.Play-area {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 16px;
+    width: 100%;
+}
+
+/* === DECK BUTTON === */
+.Deck-button {
+    background: none;
+    border: none;
+    cursor: pointer;
+    padding: 0;
+}
+
+.Deck {
+    position: relative;
+    display: inline-block;
+    color: #e0d7c6;
+}
+
+.Deck img {
+    width: var(--card-width);
+    display: block;
+}
+
+.Deck p, .Deck span {
+    position: absolute;
+    left: 0; right: 0;
+    text-align: center;
+}
+
+.Deck p { top: 40%; }
+.Deck span { top: 60%; }
+
+/* === TOP ROW: deck + dungeon === */
+.Top-row {
+    display: flex;
+    flex-direction: row;
+    align-items: flex-start;
+    gap: 24px;
+    width: 100%;
+    justify-content: center;
+}
+
+.Top-row button {
+    background: none;
+    border: none;
+    outline: none;
+    padding: 0;
+    cursor: pointer;
+    font-size: 2rem;
+}
+
+/* === DUNGEON === */
+.Dungeon-entities {
+    display: grid;
+    grid-template-columns: repeat(4, var(--card-width));
+    gap: 10px;
+    align-items: flex-start;
+}
+
+.Dungeon-entities img {
+    width: var(--card-width);
+    display: block;
+}
+
+
+.Dungeon-entities button:hover img {
+    transform: translateY(-4px);
+}
+
+/* === PLAYER WEAPON === */
+.Player-weapon {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+}
+
+.Weapon-slot {
+    position: relative;
+    width: var(--card-width) + 10px;
+    /* height: 100px; */
+    /* border: 2px dashed #555; */
+    border-radius: 4px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: #555;
+    /* font-size: 0.75rem; */
+}
+
+.Weapon-slot button {
+    background: none;
+    border: none;
+    cursor: pointer;
+    padding: 0;
+}
+
+.Weapon-slot img {
+    width: var(--card-width);
+    display: block;
+}
+
+.Durability-stack {
+    position: absolute;
+    top: 0; left: 0;
+    display: flex;
+}
+
+.Durability-stack img {
+    width: var(--card-width);
+    position: absolute;
+    top: 0; left: 0;    
+}
+
+/* === LOSE / WIN SCREENS === */
+.Lose-screen, .Win-screen {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    width: 100%;
+}
+
+.Lose-screen > div, .Win-screen > div {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 16px;
+    padding: 40px;
+    background: #16213e;
+    border-radius: 8px;
+    border: 1px solid #333;
+}
+
+.Lose-screen button, .Win-screen button {
+    padding: 10px 24px;
+    background: #e0d7c6;
+    color: #1a1a2e;
+    border: none;
+    cursor: pointer;
+    font-family: inherit;
+    /* font-size: 1rem; */
+}
+
+/* === MOBILE === */
+@media (max-width: 600px) {
+    :root {
+        --card-width: 100px;
+    }
+
+    body {
+        font-size: 2rem;
+    }
+
+    .Card-tooltip {
+        display: none;
+    }
+
+    
+    .Top-row {
+        flex-direction: column;
+        align-items: center;
+    }
+
+    .Dungeon-entities {
+        grid-template-columns: repeat(2, var(--card-width));
+    }
+}
