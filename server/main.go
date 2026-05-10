@@ -14,7 +14,9 @@ func todo(msg string) {
 }
 
 type Player struct {
-	Name string
+	Name      string
+	gamestate *Gamestate
+	selected  Card
 }
 
 type Room struct {
@@ -29,6 +31,8 @@ var store struct {
 }
 
 func main() {
+	// serve the frontend
+	http.Handle("/", http.FileServer(http.Dir("../client")))
 
 	store.Rooms = make(map[int]Room)
 	// create a new room with self as the host, returns room id as response on OK
@@ -46,8 +50,8 @@ func main() {
 		}
 
 		new_room := Room{
-			Player{host},
-			Player{""},
+			Player{host, new(Gamestate)},
+			Player{},
 		}
 		var new_room_id int
 
@@ -91,7 +95,7 @@ func main() {
 			return
 		}
 
-		target_room.Guest = Player{guest}
+		target_room.Guest = Player{guest, new(Gamestate)}
 		store.Rooms[id] = target_room
 
 		target_room_json, _ := json.Marshal(target_room)
