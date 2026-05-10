@@ -135,7 +135,7 @@
 						this.ran = false;
 					}
 
-					// only numeric cards have special purposes
+					// only non-numeric cards have special purposes
 					if(value <= 10){
 						if(clicked.suit == 'diamonds'){
 							// take up as weapon
@@ -216,7 +216,13 @@
 			click_card: (idx) => $store.game.click_card(idx),
 			run_away: () => $store.game.run_away(),
 			estimate_val: (card) => $store.game.estimate(card)
-		}" x-init="save()" >
+			}" x-init="
+				if (amount == $store.game.dungeon.length) {
+					reset()
+			} else {
+				save()
+			}
+			" >
 			<div x-data="{ showRules: false }">
 			    <button type="button" x-on:click="showRules = true" style="padding: 8px 20px; background:#e0d7c6; color:#1a1a2e; border:none; cursor:pointer; border-radius:6px;">
 			        Rules
