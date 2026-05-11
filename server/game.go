@@ -1,6 +1,8 @@
 package main
 
-import "math/rand"
+import (
+	"math/rand"
+)
 
 type Suit uint
 
@@ -27,7 +29,7 @@ type Gamestate struct {
 	durability int
 	ran        bool
 	healed     bool
-	dungeon    [4]Card
+	dungeon    []Card
 	hp         int
 }
 
@@ -79,7 +81,7 @@ func Populate_default_deck() {
 }
 
 func value(card Card) int {
-	return (card.index % int(Suits_count)) + 2
+	return (card.index % 13) + 2
 }
 
 func card_of(value int, suit int) Card {
@@ -104,7 +106,7 @@ func draw(gast *Gamestate, amount int) []Card {
 func click_card(active_gast *Gamestate, idx int) (clicked Card, is_attack bool) {
 	clicked = active_gast.dungeon[idx]
 	// cards are an array of 4x13
-	suit := Suit(clicked.index / int(Suits_count))
+	suit := Suit(clicked.index / 13)
 
 	value := value(clicked)
 
@@ -210,4 +212,25 @@ func run_away(active_gast *Gamestate) (denied bool) {
 	return
 }
 
-// TODO: add separate functions for each player action
+// client payload
+type Action struct {
+	Equip_weapon       bool `json:"equip_weapon"`
+	Ran                bool `json:"ran"`
+	Clicked_card_index int  `json:"clicked_card_index"`
+}
+
+func Execute_action(active_gast *Gamestate, act Action) (selected Card, is_attack bool, failed bool) {
+	if act.Equip_weapon {
+		if active_gast.weapon.index < 0 {
+			active_gast.weapon.index = -active_gast.weapon.index
+		}
+	}
+
+	if act.Ran {
+		failed = run_away(active_gast)
+	}
+
+	selected, is_attack = click_card(active_gast, act.Clicked_card_index)
+
+	return
+}
