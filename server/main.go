@@ -14,9 +14,9 @@ func todo(msg string) {
 }
 
 type Player struct {
+	Mutex     *sync.Mutex `json:"-"`
 	Name      string
 	gamestate *Gamestate
-	selected  Card
 }
 
 type Room struct {
@@ -34,6 +34,82 @@ func main() {
 	// serve the frontend
 	http.Handle("/", http.FileServer(http.Dir("../client")))
 
+	// handle actions/commands from players
+	http.HandleFunc("POST /action/{room_id}/{role}", func(w http.ResponseWriter, r *http.Request) {
+		room_id_string := r.PathValue("room_id")
+		room_id, err := strconv.Atoi(room_id_string)
+		if err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			fmt.Fprint(w, "Room_id must be a valid integer")
+			return
+		}
+
+		role := r.PathValue("role")
+
+		var action Action
+		err = json.NewDecoder(r.Body).Decode(&action)
+		if err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			fmt.Fprintf(w, "Bad json body, parsing error: %v", err)
+			return
+		}
+
+		var room Room
+		store.Mutex.Lock()
+		{
+			room = store.Rooms[room_id]
+		}
+		store.Mutex.Unlock()
+
+		var player Player
+		var opponent Player
+		switch role {
+		case "host":
+			player = room.Host
+			opponent = room.Guest
+		case "guest":
+			player = room.Guest
+			opponent = room.Host
+		default:
+			{
+				w.WriteHeader(http.StatusBadRequest)
+				fmt.Fprintf(w, "Role [%v] doesn't exist, use [host] or [guest]", role)
+				return
+			}
+		}
+
+		var selected_card Card
+		var is_attack bool
+		var failed bool
+
+		player.Mutex.Lock()
+		{
+			selected_card, is_attack, failed = Execute_action(player.gamestate, action)
+		}
+		player.Mutex.Unlock()
+
+		var blocked bool
+		var defended bool
+		if is_attack {
+			opponent.Mutex.Lock()
+			{
+				blocked, defended = attack(opponent.gamestate, selected_card)
+			}
+			opponent.Mutex.Unlock()
+		}
+
+		type Action_result struct {
+			Failed   bool `json:"failed"`
+			Blocked  bool `json:"blocked"`
+			Defended bool `json:"defended"`
+		}
+
+		action_result := Action_result{failed, blocked, defended}
+
+		_ = json.NewEncoder(w).Encode(action_result)
+
+	})
+
 	store.Rooms = make(map[int]Room)
 	// create a new room with self as the host, returns room id as response on OK
 	http.HandleFunc("POST /room/{host}", func(w http.ResponseWriter, r *http.Request) {
@@ -50,9 +126,13 @@ func main() {
 		}
 
 		new_room := Room{
-			Player{host, new(Gamestate)},
+			Player{},
 			Player{},
 		}
+		new_room.Host.Name = host
+		new_room.Host.gamestate = new(Gamestate)
+		new_room.Host.Mutex = new(sync.Mutex)
+
 		var new_room_id int
 
 		store.Mutex.Lock()
@@ -95,7 +175,10 @@ func main() {
 			return
 		}
 
-		target_room.Guest = Player{guest, new(Gamestate)}
+		reset(target_room.Guest.gamestate)
+		reset(target_room.Host.gamestate)
+
+		target_room.Guest = Player{new(sync.Mutex), guest, new(Gamestate)}
 		store.Rooms[id] = target_room
 
 		target_room_json, _ := json.Marshal(target_room)
