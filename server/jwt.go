@@ -9,16 +9,18 @@ import (
 )
 
 var secret = []byte("secret-key")
+var admin_secret = "secret-admin"
 
 func Token(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Role string `json:"role"`
 		Name string `json:"name"`
+		Id   int    `json:"id"`
 	}
 	json.NewDecoder(r.Body).Decode(&body)
 
 	if body.Role == "ADMIN" {
-		if body.Name != "secret-admin" {
+		if body.Name != admin_secret {
 			w.WriteHeader(http.StatusForbidden)
 			return
 		}
@@ -27,6 +29,7 @@ func Token(w http.ResponseWriter, r *http.Request) {
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
 		"role": body.Role,
 		"name": body.Name,
+		"id":   body.Id,
 		"exp":  time.Now().Add(time.Minute).Unix(),
 	})
 
@@ -40,24 +43,18 @@ func Token(w http.ResponseWriter, r *http.Request) {
 
 }
 
-func requireAuth(role string, next http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		tokenStr := r.Header.Get("Authorization")
+func ExtractClaims(r *http.Request) jwt.MapClaims {
+	tokenStr := r.Header.Get("Authorization")
 
-		token, err := jwt.Parse(tokenStr, func(t *jwt.Token) (any, error) {
-			return secret, nil
-		})
-		if err != nil || !token.Valid {
-			w.WriteHeader(http.StatusUnauthorized)
-			return
-		}
-
-		claims := token.Claims.(jwt.MapClaims)
-		if claims["role"] != role {
-			w.WriteHeader(http.StatusForbidden)
-			return
-		}
-
-		next(w, r)
+	token, err := jwt.Parse(tokenStr, func(t *jwt.Token) (any, error) {
+		return secret, nil
+	})
+	if err != nil || !token.Valid {
+		// w.WriteHeader(http.StatusUnauthorized)
+		return nil
 	}
+
+	claims := token.Claims.(jwt.MapClaims)
+
+	return claims
 }
