@@ -1,6 +1,7 @@
 package main
 
 import (
+	"math"
 	"math/rand"
 )
 
@@ -14,16 +15,15 @@ const (
 	Suits_count
 )
 
-var Cards [4][13]string
-
 type Card struct {
-	index int
+	value int
 }
 
 // each player has one
 type Gamestate struct {
 	deck []Card
 	// 0 means no weapon, negative means unequipped weapon
+	// TODO: change so index == value
 	weapon Card
 	// frondend keeps track of the Cards in durability
 	durability int
@@ -34,7 +34,7 @@ type Gamestate struct {
 }
 
 type GameRepr struct {
-	Deck []string `json:"deck"`
+	Deck_remaining int `json:"deck"`
 	// no string=no weapon
 	Weapon   string `json:"weapon"`
 	Equipped bool   `json:"equipped"`
@@ -45,6 +45,37 @@ type GameRepr struct {
 	Dungeon    []string `json:"dungeon"`
 	Hp         int      `json:"hp"`
 }
+
+// result.New_gamestate = format_gamestate(player.gamestate)
+func format_gamestate(gast *Gamestate) (new_repr GameRepr) {
+	new_repr.Deck_remaining = len(gast.deck)
+
+	var dungeon_cards []string
+	for _, card := range gast.dungeon {
+		dungeon_cards = append(dungeon_cards, Cards[card.index/13][card.index%13])
+	}
+	new_repr.Dungeon = dungeon_cards
+
+	new_repr.Durability = gast.durability
+
+	new_repr.Healed = gast.healed
+
+	new_repr.Hp = gast.hp
+
+	new_repr.Ran = gast.ran
+
+	new_repr.Equipped = gast.weapon.index > 0
+
+	weapon_index := int(math.Abs(float64(gast.weapon.index)))
+	new_repr.Weapon = Cards[weapon_index%4][weapon_index/4]
+	if weapon_index == 0 {
+		new_repr.Weapon = ""
+	}
+
+	return
+}
+
+var Cards [4][13]string
 
 func Populate_cards_index() {
 	suits := []string{"clubs", "diamonds", "hearts", "spades"}
@@ -66,7 +97,7 @@ func Populate_default_deck() {
 	for i, row := range Cards {
 		for j := range row {
 			if j > card_of(10, 0).index {
-				if i != 1 && i != 2 {
+				if i == 1 || i == 2 {
 					continue
 				}
 			}
@@ -103,6 +134,7 @@ func draw(gast *Gamestate, amount int) []Card {
 // 	// for the frontend to implement
 // }
 
+// TODO: fix copy, change to assigment
 func click_card(active_gast *Gamestate, idx int) (clicked Card, is_attack bool) {
 	clicked = active_gast.dungeon[idx]
 	// cards are an array of 4x13
@@ -197,8 +229,11 @@ func reset(gast *Gamestate) {
 	*gast = Gamestate{}
 	gast.deck = new_deck
 	gast.hp = 20
+
+	gast.dungeon = draw(gast, 4)
 }
 
+// TODO: fix copy, change to assigment
 func run_away(active_gast *Gamestate) (denied bool) {
 	if !active_gast.ran {
 		active_gast.deck = append(active_gast.deck, active_gast.dungeon[:]...)
@@ -214,20 +249,21 @@ func run_away(active_gast *Gamestate) (denied bool) {
 
 // client payload
 type Action struct {
-	Equip_weapon       bool `json:"equip_weapon"`
+	Toggle_weapon      bool `json:"toggle_eapon"`
 	Ran                bool `json:"ran"`
 	Clicked_card_index int  `json:"clicked_card_index"`
 }
 
 func Execute_action(active_gast *Gamestate, act Action) (selected Card, is_attack bool, failed bool) {
-	if act.Equip_weapon {
-		if active_gast.weapon.index < 0 {
-			active_gast.weapon.index = -active_gast.weapon.index
-		}
+	if act.Toggle_weapon {
+		active_gast.weapon.index = -active_gast.weapon.index
 	}
 
 	if act.Ran {
 		failed = run_away(active_gast)
+		if failed {
+			return
+		}
 	}
 
 	selected, is_attack = click_card(active_gast, act.Clicked_card_index)

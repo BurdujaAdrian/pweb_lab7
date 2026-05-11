@@ -218,7 +218,7 @@
 			run_away: () => $store.game.run_away(),
 			estimate_val: (card) => $store.game.estimate(card)
 			}" x-init="
-				if (amount == $store.game.dungeon.length) {
+				if ( $store.game.dungeon.length == 0) {
 					reset()
 			} else {
 				save()
