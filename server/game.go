@@ -1,7 +1,6 @@
 package main
 
 import (
-	"math"
 	"math/rand"
 )
 
@@ -17,14 +16,14 @@ const (
 
 type Card struct {
 	value int
+	suit  Suit
 }
 
 // each player has one
 type Gamestate struct {
-	deck []Card
-	// 0 means no weapon, negative means unequipped weapon
-	// TODO: change so index == value
-	weapon Card
+	deck     []Card
+	equipped bool
+	weapon   Card
 	// frondend keeps track of the Cards in durability
 	durability int
 	ran        bool
@@ -33,6 +32,12 @@ type Gamestate struct {
 	hp         int
 }
 
+type OpGameRepr struct {
+	Deck_remaining int    `json:"deck"`
+	Hp             int    `json:"hp"`
+	Weapon         string `json:"weapon"`
+	Played_card    string `json:"player_card"`
+}
 type GameRepr struct {
 	Deck_remaining int `json:"deck"`
 	// no string=no weapon
@@ -52,7 +57,7 @@ func format_gamestate(gast *Gamestate) (new_repr GameRepr) {
 
 	var dungeon_cards []string
 	for _, card := range gast.dungeon {
-		dungeon_cards = append(dungeon_cards, Cards[card.index/13][card.index%13])
+		dungeon_cards = append(dungeon_cards, card_to_repr(card))
 	}
 	new_repr.Dungeon = dungeon_cards
 
@@ -64,18 +69,24 @@ func format_gamestate(gast *Gamestate) (new_repr GameRepr) {
 
 	new_repr.Ran = gast.ran
 
-	new_repr.Equipped = gast.weapon.index > 0
+	new_repr.Equipped = gast.equipped
 
-	weapon_index := int(math.Abs(float64(gast.weapon.index)))
-	new_repr.Weapon = Cards[weapon_index%4][weapon_index/4]
-	if weapon_index == 0 {
-		new_repr.Weapon = ""
-	}
+	new_repr.Weapon = card_to_repr(gast.weapon)
 
 	return
 }
+func index_to_card(idx int) Card  { return Card{value: idx%13 + 2, suit: Suit(idx / 13)} }
+func card_to_index(card Card) int { return card.value - 2 + int(card.suit)*13 }
 
-var Cards [4][13]string
+func card_to_repr(card Card) string {
+	index := card_to_index(card)
+	if index < 0 {
+		return ""
+	}
+	return Cards[index]
+}
+
+var Cards [4 * 13]string
 
 func Populate_cards_index() {
 	suits := []string{"clubs", "diamonds", "hearts", "spades"}
@@ -83,40 +94,28 @@ func Populate_cards_index() {
 
 	for i, suit := range suits {
 		for j, card := range cards {
-			Cards[i][j] = suit + card
+			Cards[i*13+j] = suit + card
 		}
 	}
-
-	_ = cards
-	_ = suits
 }
 
 var default_deck []Card
 
 func Populate_default_deck() {
-	for i, row := range Cards {
-		for j := range row {
-			if j > card_of(10, 0).index {
-				if i == 1 || i == 2 {
-					continue
-				}
+	for i := range Cards {
+		card := index_to_card(i)
+		if card.value > 10 {
+			if card.suit == Diamonds || card.suit == Hearts {
+				continue
 			}
-
-			default_deck = append(default_deck, Card{i*13 + j})
 		}
+
+		default_deck = append(default_deck, card)
 	}
 
 	if len(default_deck) != 44 {
 		panic("populated default deck incorrectly")
 	}
-}
-
-func value(card Card) int {
-	return (card.index % 13) + 2
-}
-
-func card_of(value int, suit int) Card {
-	return Card{(value - 2) + 13*suit}
 }
 
 func draw(gast *Gamestate, amount int) []Card {
@@ -130,24 +129,19 @@ func draw(gast *Gamestate, amount int) []Card {
 	return new_cards
 }
 
-// func estimate() {
-// 	// for the frontend to implement
-// }
-
-// TODO: fix copy, change to assigment
 func click_card(active_gast *Gamestate, idx int) (clicked Card, is_attack bool) {
 	clicked = active_gast.dungeon[idx]
 	// cards are an array of 4x13
-	suit := Suit(clicked.index / 13)
+	suit := Suit(clicked.value / 15)
 
-	value := value(clicked)
+	value := clicked.value
 
 	// replenish cards
 	if len(active_gast.dungeon) == 1 {
 		drawn := draw(active_gast, 3)
 
 		new_dungeon := append(active_gast.dungeon[:], drawn...)
-		copy(active_gast.dungeon[:], new_dungeon)
+		active_gast.dungeon = new_dungeon
 
 		active_gast.healed = false
 		active_gast.ran = false
@@ -187,14 +181,14 @@ func click_card(active_gast *Gamestate, idx int) (clicked Card, is_attack bool) 
 }
 
 func attack(def_gast *Gamestate, attack Card) (blocked bool, defended bool) {
-	motion_value := value(attack)
+	motion_value := attack.value
 
 	// if a weapon is pressent and equipped
-	if def_gast.weapon.index > 0 {
+	if def_gast.equipped && def_gast.weapon.value > 1 {
 		defended = true
 		dur := def_gast.durability
 		weapon := def_gast.weapon
-		block := value(weapon)
+		block := weapon.value
 
 		if dur == 0 {
 			dur = 15
@@ -233,14 +227,13 @@ func reset(gast *Gamestate) {
 	gast.dungeon = draw(gast, 4)
 }
 
-// TODO: fix copy, change to assigment
 func run_away(active_gast *Gamestate) (denied bool) {
 	if !active_gast.ran {
 		active_gast.deck = append(active_gast.deck, active_gast.dungeon[:]...)
 		active_gast.ran = true
 
 		new_dungeon := draw(active_gast, 4)
-		copy(active_gast.dungeon[:], new_dungeon)
+		active_gast.dungeon = new_dungeon
 	} else {
 		denied = true
 	}
@@ -256,7 +249,7 @@ type Action struct {
 
 func Execute_action(active_gast *Gamestate, act Action) (selected Card, is_attack bool, failed bool) {
 	if act.Toggle_weapon {
-		active_gast.weapon.index = -active_gast.weapon.index
+		active_gast.equipped = !active_gast.equipped
 	}
 
 	if act.Ran {
