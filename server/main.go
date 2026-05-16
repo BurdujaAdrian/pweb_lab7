@@ -9,7 +9,10 @@ import (
 	"slices"
 	"strconv"
 	"sync"
+	"time"
 )
+
+const auth = false
 
 func todo(msg string) {
 	log.Print("TODO: ", msg)
@@ -39,12 +42,22 @@ type Room struct {
 }
 
 var store struct {
-	Mutex   sync.RWMutex
-	Rooms   map[int]Room
-	Counter int
+	Room_mutex   *sync.RWMutex
+	Rooms        map[int]Room
+	SRoom_mutex  *sync.RWMutex
+	Started_room map[int]Room
+	Counter      int
 }
 
 func main() {
+	Populate_cards_index()
+	Populate_default_deck()
+
+	store.Rooms = make(map[int]Room)
+	store.Started_room = make(map[int]Room)
+	store.Room_mutex = new(sync.RWMutex)
+	store.SRoom_mutex = new(sync.RWMutex)
+
 	// serve the frontend
 	http.Handle("/", http.FileServer(http.Dir("../docs/")))
 
@@ -74,11 +87,11 @@ func main() {
 		}
 
 		var room Room
-		store.Mutex.Lock()
+		store.Room_mutex.RLock()
 		{
 			room = store.Rooms[room_id]
 		}
-		store.Mutex.Unlock()
+		store.Room_mutex.RUnlock()
 		// endof step 0
 
 		// step 1: retrive player information
@@ -101,46 +114,15 @@ func main() {
 			}
 		}
 
-		{ // verify player id via jwt
+		if auth { // verify player id via jwt
 			jwt_claims := ExtractClaims(r)
 			if jwt_claims == nil {
 				w.WriteHeader(http.StatusUnauthorized)
 				return
 			}
 
-			// verify it's actually the host/guest
-			role, exists := jwt_claims["role"]
-			if !exists {
-				w.WriteHeader(http.StatusBadRequest)
-				return
-			}
-
-			if role != "PLAYER" {
+			if !Verify(jwt_claims, role, player.Name, room_id_string) {
 				w.WriteHeader(http.StatusForbidden)
-				return
-			}
-
-			// verify it's actually that player
-			name, exists := jwt_claims["name"]
-			if !exists {
-				w.WriteHeader(http.StatusBadRequest)
-				return
-			}
-
-			if name != player.Name {
-				w.WriteHeader(http.StatusUnauthorized)
-				return
-			}
-
-			// verify it's actually that room
-			id, exists := jwt_claims["id"]
-			if !exists {
-				w.WriteHeader(http.StatusBadRequest)
-				return
-			}
-
-			if id != room_id {
-				w.WriteHeader(http.StatusUnauthorized)
 				return
 			}
 
@@ -165,6 +147,7 @@ func main() {
 			// step 5: package the new gamestate and send it
 			type Result struct {
 				New_gamestate GameRepr     `json:"new_gamestate"`
+				Op_gamestate  OpGameRepr   `json:"opponent_gamestate"`
 				Action_result ActionResult `json:"action_result"`
 			}
 
@@ -193,25 +176,45 @@ func main() {
 		}
 		// endof step 3
 
-		// TODO: add timout
-
 		// step 4 : synchronise turn
+		timeout := time.After(30 * time.Second)
+
 		if is_host {
 			// step 4a1: Host resolved their attack, blocks till guest responds
-			<-room.host_ch
+			select {
+			case <-room.host_ch:
+			case <-timeout:
+				w.WriteHeader(http.StatusGatewayTimeout)
+				return
+			}
 			// endof step 4a1
 
 			// step 4a2: Host notifies guest that it recieved messege
-			room.guest_ch <- true
+			select {
+			case room.guest_ch <- true:
+			case <-timeout:
+				w.WriteHeader(http.StatusGatewayTimeout)
+				return
+			}
 			// endof step 4a2
 
 		} else {
 			// step 4b1: Guest resolved their attack, notify host of that
-			room.host_ch <- true
+			select {
+			case room.host_ch <- true:
+			case <-timeout:
+				w.WriteHeader(http.StatusGatewayTimeout)
+				return
+			}
 			// endof step 4b1
 
 			// step 4b2: Recieve the acknowledgement from host
-			<-room.guest_ch
+			select {
+			case <-room.guest_ch:
+			case <-timeout:
+				w.WriteHeader(http.StatusGatewayTimeout)
+				return
+			}
 			// endof step 4b2
 		}
 		// endof step 4
@@ -232,7 +235,7 @@ func main() {
 		// endof step 6
 	})
 
-	store.Rooms = make(map[int]Room)
+	// TODO: Create an endpoint to start a game in a certain room
 
 	// create a new room with self as the host, returns room id as response on OK
 	http.HandleFunc("POST /room/{host}", func(w http.ResponseWriter, r *http.Request) {
@@ -241,37 +244,24 @@ func main() {
 
 		defer log.Printf("(/%v %v) room/%v", r.Method, r.Host, host)
 
-		{ // verify jwt token
+		if auth { // verify jwt token
 			jwt_claims := ExtractClaims(r)
 			if jwt_claims == nil {
 				w.WriteHeader(http.StatusUnauthorized)
 				return
 			}
 
-			role, exists := jwt_claims["role"]
-			if !exists {
-				w.WriteHeader(http.StatusBadRequest)
-				return
+			if VerifyAdmin(jwt_claims) {
+				goto auth_end
 			}
-
-			if role != "PLAYER" && role != "ADMIN" {
-				w.WriteHeader(http.StatusForbidden)
-				return
-			}
-
-			name, exists := jwt_claims["name"]
-			if !exists {
-				w.WriteHeader(http.StatusBadRequest)
-				return
-			}
-
-			if name != host {
+			if !Verify(jwt_claims, "PLAYER", host, "0") {
 				w.WriteHeader(http.StatusForbidden)
 				return
 			}
 
 			// else, free to go
 		}
+	auth_end:
 
 		if host == "" {
 			w.WriteHeader(http.StatusBadRequest)
@@ -292,22 +282,68 @@ func main() {
 
 		var new_room_id int
 
-		store.Mutex.Lock()
+		store.Room_mutex.Lock()
 		{
 			store.Rooms[store.Counter] = new_room
 			new_room_id = store.Counter
 			store.Counter += 1
 		}
-		store.Mutex.Unlock()
+		store.Room_mutex.Unlock()
 
 		fmt.Fprintf(w, `{"room_id": %v}`, new_room_id)
 	})
 
+	// Get an update on the room
+	http.HandleFunc("GET /room/{id}", func(w http.ResponseWriter, r *http.Request) {
+		id_string := r.PathValue("id")
+		id, err := strconv.Atoi(id_string)
+		if err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			fmt.Fprint(w, "Error parsing room id:", err)
+			log.Print("Error parsing room id:", err)
+			return
+		}
+
+		defer log.Printf("(/%v %v) /room/%v", r.Method, r.Host, id)
+
+		var room Room
+		store.Room_mutex.RLock()
+		{
+			room = store.Rooms[id]
+		}
+		store.Room_mutex.RUnlock()
+
+		if auth { // verify jwt token
+			jwt_claims := ExtractClaims(r)
+			if jwt_claims == nil {
+				w.WriteHeader(http.StatusUnauthorized)
+				return
+			}
+
+			if VerifyAdmin(jwt_claims) {
+				goto auth_end
+			}
+
+			if !Verify(jwt_claims, "HOST", room.Host.Name, id_string) &&
+				!Verify(jwt_claims, "GUEST", room.Guest.Name, id_string) {
+				w.WriteHeader(http.StatusForbidden)
+				return
+			}
+
+		}
+
+	auth_end:
+		store.Room_mutex.RLock()
+		Rooms_json, _ := json.Marshal(store.Rooms[id])
+		store.Room_mutex.RUnlock()
+
+		w.Write(Rooms_json)
+	})
 	// get list of all rooms as a list [{host: <s>, guest:<s>}, ...] as json
 	http.HandleFunc("GET /room", func(w http.ResponseWriter, r *http.Request) {
 		defer log.Printf("(/%v %v) /room", r.Method, r.Host)
 
-		{ // verify jwt token
+		if auth { // verify jwt token
 			jwt_claims := ExtractClaims(r)
 			if jwt_claims == nil {
 				w.WriteHeader(http.StatusUnauthorized)
@@ -326,9 +362,9 @@ func main() {
 			}
 			// else, free to go
 		}
-		store.Mutex.RLock()
+		store.Room_mutex.RLock()
 		Rooms_json, _ := json.Marshal(slices.Collect(maps.Values(store.Rooms)))
-		store.Mutex.RUnlock()
+		store.Room_mutex.RUnlock()
 
 		w.Write(Rooms_json)
 	})
@@ -347,48 +383,26 @@ func main() {
 
 		defer log.Printf("(/%v %v) /room/%v/%v", r.Method, r.Host, guest, id)
 
-		{ // verify jwt token
+		if auth { // verify jwt token
 			jwt_claims := ExtractClaims(r)
 			if jwt_claims == nil {
 				w.WriteHeader(http.StatusUnauthorized)
 				return
 			}
 
-			role, exists := jwt_claims["role"]
-			if !exists {
-				w.WriteHeader(http.StatusBadRequest)
+			if VerifyAdmin(jwt_claims) {
+				goto end_auth
+			}
+
+			if !Verify(jwt_claims, "PLAYER", guest, id_string) {
+				w.WriteHeader(http.StatusForbidden)
 				return
 			}
-
-			switch role {
-			case "PLAYER":
-				{
-					name, exists := jwt_claims["name"]
-					if !exists {
-						w.WriteHeader(http.StatusBadRequest)
-						return
-					}
-
-					if name != guest {
-						w.WriteHeader(http.StatusForbidden)
-						return
-					}
-				}
-			case "ADMIN":
-				{
-					// full conrtoll
-				}
-			default:
-				{
-					w.WriteHeader(http.StatusForbidden)
-					return
-				}
-			}
-			// else, free to go
 		}
 
-		store.Mutex.Lock()
-		defer store.Mutex.Unlock()
+	end_auth:
+		store.Room_mutex.Lock()
+		defer store.Room_mutex.Unlock()
 
 		target_room, exists := store.Rooms[id]
 		if !exists {
@@ -419,73 +433,43 @@ func main() {
 		}
 		defer log.Printf("(/%v %v) /room/%v", r.Method, r.Host, id)
 
+		var old_room Room
+		var exists bool
+		store.Room_mutex.RLock()
+		{
+			old_room, exists = store.Rooms[id]
+		}
+		store.Room_mutex.RUnlock()
+		if !exists {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+
 		var is_admin bool
-		var role, name string
-		{ // verify jwt token and extract info
+		if auth { // verify jwt token and extract info
+
 			jwt_claims := ExtractClaims(r)
 			if jwt_claims == nil {
 				w.WriteHeader(http.StatusUnauthorized)
 				return
 			}
 
-			__role, exists := jwt_claims["role"]
-			if !exists {
-				w.WriteHeader(http.StatusBadRequest)
+			is_admin = VerifyAdmin(jwt_claims)
+			if is_admin {
+				goto delete_room
+			}
+
+			if !Verify(jwt_claims, "HOST", old_room.Host.Name, id_string) {
+				w.WriteHeader(http.StatusForbidden)
 				return
 			}
 
-			role = __role.(string)
-
-			switch role {
-			case "PLAYER":
-				{
-					__name, exists := jwt_claims["name"]
-					if !exists {
-						w.WriteHeader(http.StatusBadRequest)
-						return
-					}
-
-					name = __name.(string)
-
-				}
-			case "ADMIN":
-				{
-					if jwt_claims["name"].(string) != admin_secret {
-						w.WriteHeader(http.StatusForbidden)
-					}
-					// full conrtoll
-					is_admin = true
-				}
-			default:
-				{
-					w.WriteHeader(http.StatusForbidden)
-					return
-				}
-			}
-			// else, free to go
 		}
 
-		store.Mutex.Lock()
-		defer store.Mutex.Unlock()
-
-		old_room, exists := store.Rooms[id]
-		if !exists {
-			w.WriteHeader(http.StatusNotFound)
-			return
-		}
-
-		if is_admin {
-			delete(store.Rooms, id)
-			w.WriteHeader(http.StatusOK)
-			return
-		}
-
-		if role == "PLAYER" && old_room.Host.Name != name {
-			w.WriteHeader(http.StatusForbidden)
-			return
-		}
-
+	delete_room:
+		store.Room_mutex.Lock()
 		delete(store.Rooms, id)
+		store.Room_mutex.Unlock()
 
 		old_room_json, _ := json.Marshal(old_room)
 		w.Write(old_room_json)
