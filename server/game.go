@@ -214,6 +214,11 @@ func attack(def_gast *Gamestate, attack Card) (blocked bool, defended bool) {
 	return
 }
 
+func is_move_legal(active_gast *Gamestate, act Action) bool {
+	todo("implement this")
+
+	return false
+}
 func reset(gast *Gamestate) {
 	new_deck := append([]Card{}, default_deck...)
 	rand.Shuffle(44, func(i, j int) {
