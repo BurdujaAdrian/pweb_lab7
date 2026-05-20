@@ -2,6 +2,7 @@ package main
 
 import (
 	"math/rand"
+	"slices"
 	"sync"
 )
 
@@ -156,10 +157,15 @@ func draw(gast *Gamestate, amount int) []Card {
 	return new_cards
 }
 
-func click_card(active_gast *Gamestate, idx int) (clicked Card, is_attack bool) {
+func click_card(active_gast *Gamestate, idx int) (clicked Card, valid bool) {
+	if idx >= len(active_gast.dungeon) {
+		valid = false
+		return
+	}
 	clicked = active_gast.dungeon[idx]
+	active_gast.dungeon = slices.Delete(active_gast.dungeon, idx, idx+1)
 	// cards are an array of 4x13
-	suit := Suit(clicked.value / 15)
+	suit := clicked.suit
 
 	value := clicked.value
 
@@ -203,12 +209,20 @@ func click_card(active_gast *Gamestate, idx int) (clicked Card, is_attack bool) 
 		}
 	}
 
-	is_attack = true
 	return
 }
 
 func resolve_attack(def_gast *Gamestate, attack Card) (blocked bool, defended bool) {
 	motion_value := attack.value
+	// no attack was sent
+	if motion_value == 0 {
+		return
+	}
+
+	switch attack.suit {
+	case Diamonds, Hearts:
+		return
+	}
 
 	// if a weapon is pressent and equipped
 	if def_gast.equipped && def_gast.weapon.value > 1 {
@@ -225,7 +239,7 @@ func resolve_attack(def_gast *Gamestate, attack Card) (blocked bool, defended bo
 		if motion_value < dur {
 			blocked = true
 
-			def_gast.hp = def_gast.hp + min(block-motion_value, 0)
+			def_gast.hp = def_gast.hp + min(motion_value-block, 0)
 
 			def_gast.durability = motion_value
 
@@ -274,19 +288,12 @@ type Action struct {
 	Clicked_card_index int  `json:"clicked_card_index"`
 }
 
-func Execute_action(active_gast *Gamestate, act Action) (selected Card, is_attack bool, failed bool) {
+func Execute_action(active_gast *Gamestate, act Action) (selected Card, failed bool) {
 	if act.Toggle_weapon {
 		active_gast.equipped = !active_gast.equipped
 	}
 
-	if act.Ran {
-		failed = run_away(active_gast)
-		if failed {
-			return
-		}
-	}
-
-	selected, is_attack = click_card(active_gast, act.Clicked_card_index)
+	selected, failed = click_card(active_gast, act.Clicked_card_index)
 
 	return
 }

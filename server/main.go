@@ -130,7 +130,7 @@ func main() {
 				var exists bool
 				store.SRoom_mutex.RLock()
 				{
-					room, exists = store.Rooms[id]
+					room, exists = store.Started_room[id]
 				}
 				store.SRoom_mutex.RUnlock()
 				if !exists {
@@ -200,11 +200,11 @@ func main() {
 			// step 1: get information about the room
 			var room *Room
 			var exists bool
-			store.SRoom_mutex.RLock()
+			store.Room_mutex.RLock()
 			{
-				room, exists = store.Started_room[id]
+				room, exists = store.Rooms[id]
 			}
-			store.SRoom_mutex.RUnlock()
+			store.Room_mutex.RUnlock()
 
 			// check if the room was actually there
 			if !exists {
@@ -249,22 +249,6 @@ func main() {
 			}
 			// endof step 2
 
-			// step 3: wait for player randevouz, if timeout, abort operation
-			timeout := time.After(30 * time.Second)
-
-			var response int
-			if is_host {
-				response = host_handshake(room, timeout)
-
-			} else {
-				response = guest_handshake(room, timeout)
-			}
-			if response != 0 {
-				w.WriteHeader(response)
-				return
-			}
-			// endof step 3
-
 			// step 4: move the room in the started rooms section if the host sent the request
 			if is_host {
 				store.Room_mutex.Lock()
@@ -280,6 +264,22 @@ func main() {
 				store.SRoom_mutex.Unlock()
 			}
 			// endof step 4
+
+			// step 3: wait for player randevouz, if timeout, abort operation
+			timeout := time.After(30 * time.Second)
+
+			var response int
+			if is_host {
+				response = host_handshake(room, timeout)
+
+			} else {
+				response = guest_handshake(room, timeout)
+			}
+			if response != 0 {
+				w.WriteHeader(response)
+				return
+			}
+			// endof step 3
 
 			// step 5: initialise game state with default values
 			reset(player.gamestate)
@@ -354,9 +354,6 @@ func main() {
 				}
 			}
 
-			player.Mutex.Lock()
-			defer player.Mutex.Unlock()
-
 			if AUTH { // verify player id via jwt
 				jwt_claims := ExtractClaims(r)
 				if jwt_claims == nil {
@@ -375,16 +372,13 @@ func main() {
 
 			// step 1a: if player asked to change the dungeon, do that and imediately return the new dungeon
 			if action.Ran {
-
 				// step 1a1: check if running away is legal, if it is, do that
-				if player.gamestate.ran || len(player.gamestate.dungeon) != 4 {
-					// if already ran, or dungeon has 3 or less cards
+				player.Mutex.Lock()
+				defer player.Mutex.Unlock()
+				if denied := run_away(player.gamestate); denied {
 					w.WriteHeader(http.StatusForbidden)
 					return
 				}
-
-				player.gamestate.deck = append(player.gamestate.deck, player.gamestate.dungeon...)
-				player.gamestate.dungeon = draw(player.gamestate, 4)
 				player.gamestate.ran = true
 				// endof step 1a1
 
@@ -400,34 +394,34 @@ func main() {
 				// endof step 1a3
 				return
 			}
+			// endof step 1a
 
 			// step 2 : synchronise players actions; if timeout abort action
 			// endof step 2
 
 			// step 3: execute active player action
 			todo("figure out what to do with the outcome of the attack")
-			selected_card, is_attack, failed := Execute_action(player.gamestate, action)
+			selected_card, failed := Execute_action(player.gamestate, action)
+			todo("figure out what to do when an ivalid action (click out of bounds) was commited by opponent")
 			// endof step 3
 
 			// step 4: attack defending player
-			var attack Card
-			if is_attack {
-				attack = selected_card
-			}
 
 			select {
-			case opponent.comm <- attack:
+			case opponent.comm <- selected_card:
 			default:
 				// if sent too many commands in the row
 				w.WriteHeader(http.StatusTooManyRequests)
 				return
 			}
+
 			// endof step 4
 
 			// step 5 : resolve opponents attack
 			timeout := time.After(30 * time.Second)
+			var op_card Card
 			select {
-			case attack = <-player.comm:
+			case op_card = <-player.comm:
 			case <-timeout:
 				w.WriteHeader(http.StatusGatewayTimeout)
 				return
@@ -436,22 +430,28 @@ func main() {
 				return
 			}
 			var blocked, defended bool
-			var op_card Card
 
-			blocked, defended = resolve_attack(player.gamestate, attack)
-			// endof step 5
-
-			empty_card := Card{}
-			if op_card == empty_card {
-				panic("somehow opponent sent an empty card")
+			player.Mutex.Lock()
+			{
+				blocked, defended = resolve_attack(player.gamestate, op_card)
 			}
+			// now that I finished updating my gamestate after sending my op_card, I can safely unlock
+			player.Mutex.Unlock()
+			// endof step 5
 
 			// step 6: package the new gamestate and send it
 
 			result := Result{}
 			result.Action_result = ActionResult{failed, blocked, defended}
 			result.New_gamestate = format_gamestate(player.gamestate)
-			result.Op_gamestate = format_op_gamestate(opponent.gamestate, op_card)
+
+			// to make sure I read opponents gamestate only after they've finished updating theirs
+			opponent.Mutex.Lock()
+			{
+				result.Op_gamestate = format_op_gamestate(opponent.gamestate, op_card)
+			}
+			opponent.Mutex.Unlock()
+
 			// endof step 6
 
 			// step 7: send the result
@@ -504,9 +504,12 @@ func main() {
 				make(chan Card),
 				make(chan Card),
 			})
-			new_room.Host.Name = host
-			new_room.Host.gamestate = new(Gamestate)
-			new_room.Host.Mutex = new(sync.Mutex)
+			new_room.Host = Player{
+				new(sync.Mutex),
+				host,
+				new(Gamestate{}),
+				make(chan Card, 1),
+			}
 
 			var new_room_id int
 
