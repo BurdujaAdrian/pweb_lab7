@@ -6,6 +6,11 @@ import (
 	"sync"
 )
 
+// game parameters
+const (
+	MAX_HP = 40
+)
+
 type Suit uint
 
 const (
@@ -151,6 +156,9 @@ func draw(gast *Gamestate, amount int) []Card {
 		panic("asked to draw less then 1 card")
 	}
 
+	if amount >= len(gast.deck) {
+		amount = len(gast.deck)
+	}
 	new_cards := gast.deck[:amount]
 	gast.deck = gast.deck[amount:]
 
@@ -162,24 +170,13 @@ func click_card(active_gast *Gamestate, idx int) (clicked Card, valid bool) {
 		valid = false
 		return
 	}
+	valid = true
 	clicked = active_gast.dungeon[idx]
 	active_gast.dungeon = slices.Delete(active_gast.dungeon, idx, idx+1)
 	// cards are an array of 4x13
 	suit := clicked.suit
 
 	value := clicked.value
-
-	// replenish cards
-	if len(active_gast.dungeon) == 1 {
-		drawn := draw(active_gast, 3)
-
-		new_dungeon := append(active_gast.dungeon[:], drawn...)
-		active_gast.dungeon = new_dungeon
-
-		active_gast.healed = false
-		active_gast.ran = false
-
-	}
 
 	// handle non-numeric cards
 	if value <= 10 {
@@ -191,22 +188,26 @@ func click_card(active_gast *Gamestate, idx int) (clicked Card, valid bool) {
 				active_gast.durability = 0
 
 				// greater then 0 weapon id means equipped
-				return
 			}
 		case Hearts:
 			{ // heal
 				if !active_gast.healed {
-					active_gast.hp = min(active_gast.hp+value, 20)
+					active_gast.hp = min(active_gast.hp+value, MAX_HP)
 					active_gast.healed = true
-				} else {
-					// nothing happens
 				}
-				return
-
 			}
-		// else combat
-		default:
 		}
+	}
+
+	// replenish cards
+	if len(active_gast.dungeon) == 1 {
+		drawn := draw(active_gast, 3)
+
+		new_dungeon := append(active_gast.dungeon[:], drawn...)
+		active_gast.dungeon = new_dungeon
+
+		active_gast.healed = false
+		active_gast.ran = false
 	}
 
 	return
@@ -239,7 +240,7 @@ func resolve_attack(def_gast *Gamestate, attack Card) (blocked bool, defended bo
 		if motion_value < dur {
 			blocked = true
 
-			def_gast.hp = def_gast.hp + min(motion_value-block, 0)
+			def_gast.hp = def_gast.hp + min(block-motion_value, 0)
 
 			def_gast.durability = motion_value
 
@@ -263,7 +264,7 @@ func reset(gast *Gamestate) {
 
 	*gast = Gamestate{}
 	gast.deck = new_deck
-	gast.hp = 20
+	gast.hp = MAX_HP
 
 	gast.dungeon = draw(gast, 4)
 }
