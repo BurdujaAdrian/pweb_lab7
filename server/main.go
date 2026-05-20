@@ -19,22 +19,6 @@ func todo(msg string) {
 	panic("")
 }
 
-type ActionResult struct {
-	Failed   bool `json:"failed"`
-	Blocked  bool `json:"blocked"`
-	Defended bool `json:"defended"`
-}
-type GameAction struct {
-	selected  Card
-	is_attack bool
-	failed    bool
-}
-type Player struct {
-	Mutex     *sync.Mutex `json:"-"`
-	Name      string
-	gamestate *Gamestate
-}
-
 type Room struct {
 	Host      Player
 	Guest     Player
@@ -52,6 +36,55 @@ var store struct {
 	Counter      int
 }
 
+func host_handshake(room *Room, timeout <-chan time.Time) int {
+	// step 2a1: Host waits for guest's messege
+	select {
+	case <-room.host_ch:
+	case <-room.quit:
+		return http.StatusGone
+	case <-timeout:
+		return http.StatusGatewayTimeout
+	}
+	// endof step 2a1
+
+	// step 2a2: Host notifies guest that it recieved messege
+	select {
+	case room.guest_ch <- Card{}:
+	case <-room.quit:
+		return (http.StatusGone)
+	case <-timeout:
+		return (http.StatusGatewayTimeout)
+	}
+	// endof step 2a2
+	return 0
+}
+
+func guest_handshake(room *Room, timeout <-chan time.Time) int {
+	// step 2b1: Guest sends messege to host
+	select {
+	case room.host_ch <- Card{}:
+	case <-room.quit:
+		return (http.StatusGone)
+
+	case <-timeout:
+		return (http.StatusGatewayTimeout)
+
+	}
+	// endof step 2b1
+
+	// step 2b2: Recieve the acknowledgement from host
+	select {
+	case <-room.guest_ch:
+	case <-room.quit:
+		return (http.StatusGone)
+
+	case <-timeout:
+		return (http.StatusGatewayTimeout)
+
+	}
+	// endof step 2b2
+	return 0
+}
 func main() {
 	todo("Check game wincon")
 	Populate_cards_index()
@@ -219,63 +252,16 @@ func main() {
 			// step 3: wait for player randevouz, if timeout, abort operation
 			timeout := time.After(30 * time.Second)
 
+			var response int
 			if is_host {
-				// step 3a1: Host resolved their attack, blocks till guest responds
-				select {
-				case <-room.host_ch:
-				case <-room.quit:
-					{
-						w.WriteHeader(http.StatusGone)
-						return
-					}
-				case <-timeout:
-					w.WriteHeader(http.StatusGatewayTimeout)
-					return
-				}
-				// endof step 3a1
-
-				// step 3a2: Host notifies guest that it recieved messege
-				select {
-				case room.guest_ch <- Card{}:
-				case <-room.quit:
-					{
-						w.WriteHeader(http.StatusGone)
-						return
-					}
-				case <-timeout:
-					w.WriteHeader(http.StatusGatewayTimeout)
-					return
-				}
-				// endof step 3a2
+				response = host_handshake(room, timeout)
 
 			} else {
-				// step 3b1: Guest resolved their attack, notify host of that
-				select {
-				case room.host_ch <- Card{}:
-				case <-room.quit:
-					{
-						w.WriteHeader(http.StatusGone)
-						return
-					}
-				case <-timeout:
-					w.WriteHeader(http.StatusGatewayTimeout)
-					return
-				}
-				// endof step 3b1
-
-				// step 3b2: Recieve the acknowledgement from host
-				select {
-				case <-room.guest_ch:
-				case <-room.quit:
-					{
-						w.WriteHeader(http.StatusGone)
-						return
-					}
-				case <-timeout:
-					w.WriteHeader(http.StatusGatewayTimeout)
-					return
-				}
-				// endof step 3b2
+				response = guest_handshake(room, timeout)
+			}
+			if response != 0 {
+				w.WriteHeader(response)
+				return
 			}
 			// endof step 3
 
@@ -351,12 +337,10 @@ func main() {
 			// endof step 0
 
 			// step 1: retrive player information
-			var is_host bool = false
 			var player Player
 			var opponent Player
 			switch role {
 			case "HOST":
-				is_host = true
 				player = room.Host
 				opponent = room.Guest
 			case "GUEST":
@@ -369,6 +353,9 @@ func main() {
 					return
 				}
 			}
+
+			player.Mutex.Lock()
+			defer player.Mutex.Unlock()
 
 			if AUTH { // verify player id via jwt
 				jwt_claims := ExtractClaims(r)
@@ -386,168 +373,72 @@ func main() {
 			}
 			// endof step 1
 
-			// step 1a: verify the legality of player's action
-			todo("verify that the action the player wants to do is legal before starting the double randezvous sequence")
-			player.Mutex.Lock()
-			{
-				legal := is_move_legal(player.gamestate, action)
-				if !legal {
-					player.Mutex.Unlock()
+			// step 1a: if player asked to change the dungeon, do that and imediately return the new dungeon
+			if action.Ran {
+
+				// step 1a1: check if running away is legal, if it is, do that
+				if player.gamestate.ran || len(player.gamestate.dungeon) != 4 {
+					// if already ran, or dungeon has 3 or less cards
 					w.WriteHeader(http.StatusForbidden)
 					return
 				}
+
+				player.gamestate.deck = append(player.gamestate.deck, player.gamestate.dungeon...)
+				player.gamestate.dungeon = draw(player.gamestate, 4)
+				player.gamestate.ran = true
+				// endof step 1a1
+
+				// step 1a2: package the response with the new gamestate
+				result := Result{}
+				result.Action_result = ActionResult{}
+				result.New_gamestate = format_gamestate(player.gamestate)
+				result.Op_gamestate = format_op_gamestate(opponent.gamestate, Card{})
+				// endof step 1a2
+
+				// step 1a3: send the result
+				json.NewEncoder(w).Encode(result)
+				// endof step 1a3
+				return
 			}
-			player.Mutex.Unlock()
 
 			// step 2 : synchronise players actions; if timeout abort action
-			timeout := time.After(30 * time.Second)
-
-			if is_host {
-				// step 2a1: Host waits for guest's messege
-				select {
-				case <-room.host_ch:
-				case <-room.quit:
-					{
-						w.WriteHeader(http.StatusGone)
-						return
-					}
-				case <-timeout:
-					w.WriteHeader(http.StatusGatewayTimeout)
-					return
-				}
-				// endof step 2a1
-
-				// step 2a2: Host notifies guest that it recieved messege
-				select {
-				case room.guest_ch <- Card{}:
-				case <-room.quit:
-					{
-						w.WriteHeader(http.StatusGone)
-						return
-					}
-				case <-timeout:
-					w.WriteHeader(http.StatusGatewayTimeout)
-					return
-				}
-				// endof step 2a2
-
-			} else {
-				// step 2b1: Guest sends messege to host
-				select {
-				case room.host_ch <- Card{}:
-				case <-room.quit:
-					{
-						w.WriteHeader(http.StatusGone)
-						return
-					}
-				case <-timeout:
-					w.WriteHeader(http.StatusGatewayTimeout)
-					return
-				}
-				// endof step 2b1
-
-				// step 2b2: Recieve the acknowledgement from host
-				select {
-				case <-room.guest_ch:
-				case <-room.quit:
-					{
-						w.WriteHeader(http.StatusGone)
-						return
-					}
-				case <-timeout:
-					w.WriteHeader(http.StatusGatewayTimeout)
-					return
-				}
-				// endof step 2b2
-			}
 			// endof step 2
 
 			// step 3: execute active player action
-			var selected_card Card
-			var is_attack, failed bool
-
-			player.Mutex.Lock()
-			{
-				selected_card, is_attack, _ = Execute_action(player.gamestate, action)
-			}
-			player.Mutex.Unlock()
+			todo("figure out what to do with the outcome of the attack")
+			selected_card, is_attack, failed := Execute_action(player.gamestate, action)
 			// endof step 3
 
 			// step 4: attack defending player
-			var blocked, defended bool
-
+			var attack Card
 			if is_attack {
-				opponent.Mutex.Lock()
-				{
-					blocked, defended = attack(opponent.gamestate, selected_card)
-				}
-				opponent.Mutex.Unlock()
+				attack = selected_card
+			}
+
+			select {
+			case opponent.comm <- attack:
+			default:
+				// if sent too many commands in the row
+				w.WriteHeader(http.StatusTooManyRequests)
+				return
 			}
 			// endof step 4
 
-			// step 5 : synchronise turn end
-			timeout = time.After(30 * time.Second)
-
+			// step 5 : resolve opponents attack
+			timeout := time.After(30 * time.Second)
+			select {
+			case attack = <-player.comm:
+			case <-timeout:
+				w.WriteHeader(http.StatusGatewayTimeout)
+				return
+			case <-room.quit:
+				w.WriteHeader(http.StatusGone)
+				return
+			}
+			var blocked, defended bool
 			var op_card Card
 
-			if is_host {
-				// step 5a1: Host resolved their attack, blocks till guest responds
-				select {
-				case op_card = <-room.host_ch:
-				case <-room.quit:
-					{
-						w.WriteHeader(http.StatusGone)
-						return
-					}
-				case <-timeout:
-					w.WriteHeader(http.StatusGatewayTimeout)
-					return
-				}
-				// endof step 5a1
-
-				// step 5a2: Host notifies guest that it recieved messege
-				select {
-				case room.guest_ch <- selected_card:
-				case <-room.quit:
-					{
-						w.WriteHeader(http.StatusGone)
-						return
-					}
-				case <-timeout:
-					w.WriteHeader(http.StatusGatewayTimeout)
-					return
-				}
-				// endof step 5a2
-
-			} else {
-				// step 5b1: Guest resolved their attack, notify host of that
-				select {
-				case room.host_ch <- selected_card:
-				case <-room.quit:
-					{
-						w.WriteHeader(http.StatusGone)
-						return
-					}
-				case <-timeout:
-					w.WriteHeader(http.StatusGatewayTimeout)
-					return
-				}
-				// endof step 5b1
-
-				// step 5b2: Recieve the acknowledgement from host
-				select {
-				case op_card = <-room.guest_ch:
-				case <-room.quit:
-					{
-						w.WriteHeader(http.StatusGone)
-						return
-					}
-				case <-timeout:
-					w.WriteHeader(http.StatusGatewayTimeout)
-					return
-				}
-				// endof step 5b2
-			}
+			blocked, defended = resolve_attack(player.gamestate, attack)
 			// endof step 5
 
 			empty_card := Card{}
@@ -560,12 +451,7 @@ func main() {
 			result := Result{}
 			result.Action_result = ActionResult{failed, blocked, defended}
 			result.New_gamestate = format_gamestate(player.gamestate)
-			result.Op_gamestate = OpGameRepr{
-				Deck_remaining: len(opponent.gamestate.deck),
-				Hp:             opponent.gamestate.hp,
-				Weapon:         card_to_repr(opponent.gamestate.weapon),
-				Played_card:    card_to_repr(op_card),
-			}
+			result.Op_gamestate = format_op_gamestate(opponent.gamestate, op_card)
 			// endof step 6
 
 			// step 7: send the result
@@ -762,7 +648,12 @@ func main() {
 			reset(target_room.Guest.gamestate)
 			reset(target_room.Host.gamestate)
 
-			target_room.Guest = Player{new(sync.Mutex), guest, new(Gamestate)}
+			target_room.Guest = Player{
+				new(sync.Mutex),
+				guest,
+				new(Gamestate),
+				make(chan Card, 1),
+			}
 			store.Rooms[id] = target_room
 
 			target_room_json, _ := json.Marshal(target_room)
