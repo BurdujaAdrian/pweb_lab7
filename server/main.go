@@ -19,23 +19,6 @@ func todo(msg string) {
 	panic("")
 }
 
-type Room struct {
-	Host      Player
-	Guest     Player
-	quit      chan struct{}
-	quit_once sync.Once
-	host_ch   chan Card
-	guest_ch  chan Card
-}
-
-var store struct {
-	Room_mutex   *sync.RWMutex
-	Rooms        map[int]*Room
-	SRoom_mutex  *sync.RWMutex
-	Started_room map[int]*Room
-	Counter      int
-}
-
 func host_handshake(room *Room, timeout <-chan time.Time) int {
 	// step 2a1: Host waits for guest's messege
 	select {
@@ -85,15 +68,38 @@ func guest_handshake(room *Room, timeout <-chan time.Time) int {
 	// endof step 2b2
 	return 0
 }
+
+type Room struct {
+	Host      Player
+	Guest     Player
+	quit      chan struct{}
+	quit_once sync.Once
+	host_ch   chan Card
+	guest_ch  chan Card
+}
+
+type Store struct {
+	Room_mutex   *sync.RWMutex
+	Rooms        map[int]*Room
+	SRoom_mutex  *sync.RWMutex
+	Started_room map[int]*Room
+	Counter      int
+}
+
+var store Store
+
 func main() {
 	todo("Check game wincon")
 	Populate_cards_index()
 	Populate_default_deck()
 
-	store.Rooms = make(map[int]*Room)
-	store.Started_room = make(map[int]*Room)
-	store.Room_mutex = new(sync.RWMutex)
-	store.SRoom_mutex = new(sync.RWMutex)
+	store = Store{
+		new(sync.RWMutex),
+		make(map[int]*Room),
+		new(sync.RWMutex),
+		make(map[int]*Room),
+		0,
+	}
 
 	// serve the frontend
 	http.Handle("/", http.FileServer(http.Dir("../docs/")))
