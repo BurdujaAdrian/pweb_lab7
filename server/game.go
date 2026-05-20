@@ -2,6 +2,7 @@ package main
 
 import (
 	"math/rand"
+	"sync"
 )
 
 type Suit uint
@@ -31,6 +32,22 @@ type Gamestate struct {
 	dungeon    []Card
 	hp         int
 }
+type ActionResult struct {
+	Failed   bool `json:"failed"`
+	Blocked  bool `json:"blocked"`
+	Defended bool `json:"defended"`
+}
+type GameAction struct {
+	selected  Card
+	is_attack bool
+	failed    bool
+}
+type Player struct {
+	Mutex     *sync.Mutex `json:"-"`
+	Name      string
+	gamestate *Gamestate
+	comm      chan Card
+}
 
 type OpGameRepr struct {
 	Deck_remaining int    `json:"deck"`
@@ -38,6 +55,16 @@ type OpGameRepr struct {
 	Weapon         string `json:"weapon"`
 	Played_card    string `json:"player_card"`
 }
+
+func format_op_gamestate(gamestate *Gamestate, card Card) OpGameRepr {
+	return OpGameRepr{
+		Deck_remaining: len(gamestate.deck),
+		Hp:             gamestate.hp,
+		Weapon:         card_to_repr(gamestate.weapon),
+		Played_card:    card_to_repr(card),
+	}
+}
+
 type GameRepr struct {
 	Deck_remaining int `json:"deck"`
 	// no string=no weapon
@@ -123,7 +150,7 @@ func draw(gast *Gamestate, amount int) []Card {
 		panic("asked to draw less then 1 card")
 	}
 
-	new_cards := gast.deck[0:amount]
+	new_cards := gast.deck[:amount]
 	gast.deck = gast.deck[amount:]
 
 	return new_cards
@@ -180,7 +207,7 @@ func click_card(active_gast *Gamestate, idx int) (clicked Card, is_attack bool) 
 	return
 }
 
-func attack(def_gast *Gamestate, attack Card) (blocked bool, defended bool) {
+func resolve_attack(def_gast *Gamestate, attack Card) (blocked bool, defended bool) {
 	motion_value := attack.value
 
 	// if a weapon is pressent and equipped
@@ -214,11 +241,6 @@ func attack(def_gast *Gamestate, attack Card) (blocked bool, defended bool) {
 	return
 }
 
-func is_move_legal(active_gast *Gamestate, act Action) bool {
-	todo("implement this")
-
-	return false
-}
 func reset(gast *Gamestate) {
 	new_deck := append([]Card{}, default_deck...)
 	rand.Shuffle(44, func(i, j int) {
