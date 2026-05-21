@@ -5,6 +5,7 @@ import (
 	"maps"
 	"os"
 	"slices"
+	"sync"
 	"testing"
 )
 
@@ -118,9 +119,9 @@ func TestClick(t *testing.T) {
 			{value: 2, suit: Hearts},
 		})
 
-		clicked, valid := click_card(gs, 1)
+		clicked, failed := click_card(gs, 1)
 
-		if !valid {
+		if failed {
 			t.Fatalf("expected valid click, got invalid; clicked: %v", clicked)
 		}
 		if clicked != diamondCard {
@@ -157,9 +158,9 @@ func TestClick(t *testing.T) {
 			{value: 9, suit: Clubs},
 		})
 
-		clicked, valid := click_card(gs, 1)
+		clicked, failed := click_card(gs, 1)
 
-		if !valid {
+		if failed {
 			t.Fatal("expected valid click")
 		}
 		if clicked != heartCard {
@@ -193,9 +194,9 @@ func TestClick(t *testing.T) {
 		click_card(gs, 0)
 		hpBefore := gs.hp
 
-		clicked, valid := click_card(gs, 1)
+		clicked, failed := click_card(gs, 1)
 
-		if !valid {
+		if failed {
 			t.Fatal("expected valid click")
 		}
 		if clicked != secondHeart {
@@ -255,8 +256,8 @@ func TestClick(t *testing.T) {
 			{value: 2, suit: Hearts},
 			{value: 3, suit: Clubs},
 		})
-		_, valid := click_card(gs, 5)
-		if valid {
+		_, failed := click_card(gs, 5)
+		if !failed {
 			t.Error("expected invalid for out-of-bounds index")
 		}
 	})
@@ -635,5 +636,476 @@ func TestRunAway(t *testing.T) {
 			t.Errorf("expected deck length 1, got %d", len(gs.deck))
 		}
 
+	})
+}
+
+func TestSimulatedTurn_BothAttack(t *testing.T) {
+	host, guest, hostComm, guestComm := newPlayerPair()
+
+	host.gamestate.dungeon = []Card{
+		{value: 8, suit: Clubs},
+		{value: 3, suit: Hearts},
+		{value: 5, suit: Diamonds},
+		{value: 2, suit: Spades},
+	}
+	guest.gamestate.dungeon = []Card{
+		{value: 6, suit: Spades},
+		{value: 4, suit: Hearts},
+		{value: 7, suit: Clubs},
+		{value: 9, suit: Hearts},
+	}
+
+	host.Mutex.Lock()
+	hostCard, failed := Execute_action(host.gamestate, Action{Clicked_card_index: 0})
+	host.Mutex.Unlock()
+	if failed {
+		t.Fatalf("host action failed or not attack: failed=%v", failed)
+	}
+
+	guest.Mutex.Lock()
+	guestCard, failed := Execute_action(guest.gamestate, Action{Clicked_card_index: 0})
+	guest.Mutex.Unlock()
+	if failed {
+		t.Fatalf("guest action failed or not attack: failed=%v", failed)
+	}
+
+	guestComm <- hostCard
+	hostComm <- guestCard
+
+	host.Mutex.Lock()
+	hostBlocked, hostDefended := resolve_attack(host.gamestate, <-hostComm)
+	host.Mutex.Unlock()
+
+	guest.Mutex.Lock()
+	guestBlocked, guestDefended := resolve_attack(guest.gamestate, <-guestComm)
+	guest.Mutex.Unlock()
+
+	if guest.gamestate.hp != MAX_HP-8 {
+		t.Errorf("guest HP = %d, want %d", guest.gamestate.hp, MAX_HP-8)
+	}
+	if host.gamestate.hp != MAX_HP-6 {
+		t.Errorf("host HP = %d, want %d", host.gamestate.hp, MAX_HP-6)
+	}
+	if hostBlocked || hostDefended || guestBlocked || guestDefended {
+		t.Error("unexpected block/defend without weapons")
+	}
+	if len(host.gamestate.dungeon) != 3 || len(guest.gamestate.dungeon) != 3 {
+		t.Errorf("dungeon lengths after click: host %d, guest %d; want 3 each", len(host.gamestate.dungeon), len(guest.gamestate.dungeon))
+	}
+}
+
+func TestSimulatedTurn_GuestRunsAway(t *testing.T) {
+	host, guest, hostComm, guestComm := newPlayerPair()
+
+	guest.gamestate.dungeon = []Card{
+		{value: 2, suit: Hearts},
+		{value: 3, suit: Hearts},
+		{value: 4, suit: Hearts},
+		{value: 5, suit: Hearts},
+	}
+	guest.gamestate.ran = false
+
+	host.gamestate.dungeon = []Card{
+		{value: 10, suit: Clubs},
+		{value: 3, suit: Diamonds},
+		{value: 7, suit: Spades},
+		{value: 2, suit: Hearts},
+	}
+
+	guest.Mutex.Lock()
+	denied := run_away(guest.gamestate)
+	guest.Mutex.Unlock()
+	if denied || !guest.gamestate.ran {
+		t.Fatal("run_away should be allowed and set ran flag")
+	}
+
+	host.Mutex.Lock()
+	hostCard, failed := Execute_action(host.gamestate, Action{Clicked_card_index: 0})
+	host.Mutex.Unlock()
+	if failed {
+		t.Fatalf("host action failed : failed=%v ", failed)
+	}
+
+	// Guest ran, but must still complete the handshake – sends sentinel, receives host's attack.
+	guestComm <- hostCard // host → guest (guest will later receive)
+	hostComm <- Card{}    // guest → host (sentinel)
+
+	host.Mutex.Lock()
+	hostBlocked, hostDefended := resolve_attack(host.gamestate, <-hostComm) // sentinel
+	host.Mutex.Unlock()
+
+	guest.Mutex.Lock()
+	guestBlocked, guestDefended := resolve_attack(guest.gamestate, <-guestComm) // host's attack
+	guest.Mutex.Unlock()
+
+	if host.gamestate.hp != MAX_HP {
+		t.Errorf("host HP should be %d (sentinel deals no damage), got %d", MAX_HP, host.gamestate.hp)
+	}
+	if guest.gamestate.hp != MAX_HP-10 {
+		t.Errorf("guest HP should be %d after host's attack, got %d", MAX_HP-10, guest.gamestate.hp)
+	}
+	if hostBlocked || hostDefended || guestBlocked || guestDefended {
+		t.Error("unexpected block/defend during this turn")
+	}
+	if len(host.gamestate.dungeon) != 3 {
+		t.Errorf("host dungeon length = %d, want 3", len(host.gamestate.dungeon))
+	}
+	if len(guest.gamestate.dungeon) != 4 {
+		t.Errorf("guest dungeon should be refreshed to 4, got %d", len(guest.gamestate.dungeon))
+	}
+}
+
+func newPlayerPair() (host, guest *Player, hostComm, guestComm chan Card) {
+	hostComm = make(chan Card, 1)
+	guestComm = make(chan Card, 1)
+	host = &Player{
+		Mutex:     new(sync.Mutex),
+		Name:      "Host",
+		gamestate: &Gamestate{},
+		comm:      hostComm,
+	}
+	guest = &Player{
+		Mutex:     new(sync.Mutex),
+		Name:      "Guest",
+		gamestate: &Gamestate{},
+		comm:      guestComm,
+	}
+	reset(host.gamestate)
+	reset(guest.gamestate)
+	return
+}
+
+func TestConcurrentTurn_BothAttack(t *testing.T) {
+	host, guest, hostComm, guestComm := newPlayerPair()
+
+	host.gamestate.dungeon = []Card{
+		{value: 8, suit: Clubs},
+		{value: 3, suit: Hearts},
+		{value: 5, suit: Diamonds},
+		{value: 2, suit: Spades},
+	}
+	guest.gamestate.dungeon = []Card{
+		{value: 6, suit: Spades},
+		{value: 4, suit: Hearts},
+		{value: 7, suit: Clubs},
+		{value: 9, suit: Hearts},
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	go func() {
+		defer wg.Done()
+		host.Mutex.Lock()
+		hostCard, _ := Execute_action(host.gamestate, Action{Clicked_card_index: 0})
+		host.Mutex.Unlock()
+		guestComm <- hostCard
+		oppCard := <-hostComm
+		host.Mutex.Lock()
+		hostBlocked, hostDefended := resolve_attack(host.gamestate, oppCard)
+		host.Mutex.Unlock()
+		if hostBlocked || hostDefended {
+			t.Error("host should not block/defend")
+		}
+	}()
+
+	go func() {
+		defer wg.Done()
+		guest.Mutex.Lock()
+		guestCard, _ := Execute_action(guest.gamestate, Action{Clicked_card_index: 0})
+		guest.Mutex.Unlock()
+		hostComm <- guestCard
+		oppCard := <-guestComm
+		guest.Mutex.Lock()
+		guestBlocked, guestDefended := resolve_attack(guest.gamestate, oppCard)
+		guest.Mutex.Unlock()
+		if guestBlocked || guestDefended {
+			t.Error("guest should not block/defend")
+		}
+	}()
+
+	wg.Wait()
+
+	if host.gamestate.hp != MAX_HP-6 {
+		t.Errorf("host HP = %d, want %d", host.gamestate.hp, MAX_HP-6)
+	}
+	if guest.gamestate.hp != MAX_HP-8 {
+		t.Errorf("guest HP = %d, want %d", guest.gamestate.hp, MAX_HP-8)
+	}
+	if len(host.gamestate.dungeon) != 3 || len(guest.gamestate.dungeon) != 3 {
+		t.Errorf("dungeon lengths: host %d, guest %d; want 3 each", len(host.gamestate.dungeon), len(guest.gamestate.dungeon))
+	}
+}
+
+func TestConcurrentTurn_OneRunsAway(t *testing.T) {
+	host, guest, hostComm, guestComm := newPlayerPair()
+
+	guest.gamestate.dungeon = []Card{
+		{value: 2, suit: Hearts},
+		{value: 3, suit: Hearts},
+		{value: 4, suit: Hearts},
+		{value: 5, suit: Hearts},
+	}
+	guest.gamestate.ran = false
+
+	host.gamestate.dungeon = []Card{
+		{value: 10, suit: Clubs},
+		{value: 3, suit: Diamonds},
+		{value: 7, suit: Spades},
+		{value: 2, suit: Hearts},
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	go func() {
+		defer wg.Done()
+		// Guest runs away – free action, no attack, but must complete handshake
+		guest.Mutex.Lock()
+		denied := run_away(guest.gamestate)
+		guest.Mutex.Unlock()
+		if denied {
+			t.Error("run_away should not be denied")
+		}
+		// Send sentinel to host
+		hostComm <- Card{}
+		// Receive host's attack
+		oppCard := <-guestComm
+		guest.Mutex.Lock()
+		guestBlocked, guestDefended := resolve_attack(guest.gamestate, oppCard)
+		guest.Mutex.Unlock()
+		if guestBlocked || guestDefended {
+			t.Error("guest should not block/defend from run‑away handshake")
+		}
+	}()
+
+	go func() {
+		defer wg.Done()
+		// Host attacks normally
+		host.Mutex.Lock()
+		hostCard, _ := Execute_action(host.gamestate, Action{Clicked_card_index: 0})
+		host.Mutex.Unlock()
+		// Send attack to guest
+		guestComm <- hostCard
+		// Receive guest's sentinel (or attack in other scenarios)
+		oppCard := <-hostComm
+		host.Mutex.Lock()
+		hostBlocked, hostDefended := resolve_attack(host.gamestate, oppCard)
+		host.Mutex.Unlock()
+		if hostBlocked || hostDefended {
+			t.Error("host should not block/defend from sentinel")
+		}
+	}()
+
+	wg.Wait()
+
+	if host.gamestate.hp != MAX_HP {
+		t.Errorf("host HP = %d, want %d (sentinel does no damage)", host.gamestate.hp, MAX_HP)
+	}
+	if guest.gamestate.hp != MAX_HP-10 {
+		t.Errorf("guest HP = %d, want %d", guest.gamestate.hp, MAX_HP-10)
+	}
+	if !guest.gamestate.ran {
+		t.Error("guest ran flag should be true")
+	}
+	if len(guest.gamestate.dungeon) != 4 {
+		t.Errorf("guest dungeon should be refreshed to 4, got %d", len(guest.gamestate.dungeon))
+	}
+	if len(host.gamestate.dungeon) != 3 {
+		t.Errorf("host dungeon length should be 3, got %d", len(host.gamestate.dungeon))
+	}
+
+}
+
+func TestToggleWeapon_EquipAndAttack(t *testing.T) {
+	gs := &Gamestate{
+		hp:       MAX_HP,
+		weapon:   Card{value: 6, suit: Diamonds},
+		equipped: false,
+		dungeon: []Card{
+			{value: 8, suit: Clubs},
+			{value: 3, suit: Hearts},
+			{value: 2, suit: Spades},
+			{value: 4, suit: Diamonds},
+		},
+		deck: append([]Card{}, default_deck...),
+	}
+
+	act := Action{
+		Toggle_weapon:      true,
+		Clicked_card_index: 0, // attack with 8 of Clubs
+	}
+
+	selected, failed := Execute_action(gs, act)
+	if failed {
+		t.Fatal("action should not fail")
+	}
+	if selected != (Card{value: 8, suit: Clubs}) {
+		t.Errorf("wrong card selected: %+v", selected)
+	}
+	if !gs.equipped {
+		t.Error("weapon should be equipped after toggle")
+	}
+	if gs.weapon.value != 6 {
+		t.Error("weapon should remain the same")
+	}
+	if len(gs.dungeon) != 3 {
+		t.Errorf("dungeon length should be 3 after click, got %d", len(gs.dungeon))
+	}
+}
+
+func TestToggleWeapon_UnequipAndAttack(t *testing.T) {
+	gs := &Gamestate{
+		hp:       MAX_HP,
+		weapon:   Card{value: 6, suit: Diamonds},
+		equipped: true,
+		dungeon: []Card{
+			{value: 10, suit: Spades},
+			{value: 5, suit: Hearts},
+			{value: 3, suit: Clubs},
+			{value: 7, suit: Clubs},
+		},
+		deck: append([]Card{}, default_deck...),
+	}
+
+	act := Action{
+		Toggle_weapon:      true,
+		Clicked_card_index: 0,
+	}
+
+	selected, failed := Execute_action(gs, act)
+	if failed {
+		t.Fatal("action should not fail")
+	}
+	if selected != (Card{value: 10, suit: Spades}) {
+		t.Errorf("wrong card selected: %+v", selected)
+	}
+	if gs.equipped {
+		t.Error("weapon should be unequipped after toggle")
+	}
+	if len(gs.dungeon) != 3 {
+		t.Errorf("dungeon length should be 3, got %d", len(gs.dungeon))
+	}
+}
+
+func TestToggleWeapon_OnlyToggleNoClick(t *testing.T) {
+	gs := &Gamestate{
+		hp:       MAX_HP,
+		weapon:   Card{value: 5, suit: Diamonds},
+		equipped: false,
+		dungeon: []Card{
+			{value: 4, suit: Hearts},
+			{value: 8, suit: Clubs},
+			{value: 3, suit: Spades},
+			{value: 9, suit: Clubs},
+		},
+		deck: append([]Card{}, default_deck...),
+	}
+
+	act := Action{
+		Toggle_weapon:      true,
+		Clicked_card_index: 0,
+	}
+
+	selected, failed := Execute_action(gs, act)
+	if failed {
+		t.Fatal("action should not fail")
+	}
+	if selected != (Card{value: 4, suit: Hearts}) {
+		t.Errorf("wrong card clicked: %+v", selected)
+	}
+	if !gs.equipped {
+		t.Error("weapon should be equipped after toggle")
+	}
+	if gs.hp != MAX_HP {
+		t.Errorf("heart should have healed, but hp is %d (maybe capped)", gs.hp)
+	}
+	if !gs.healed {
+		t.Error("healed flag should be true after heart")
+	}
+	if len(gs.dungeon) != 3 {
+		t.Errorf("dungeon length should be 3, got %d", len(gs.dungeon))
+	}
+}
+
+func TestCheckWin(t *testing.T) {
+	t.Run("both players alive", func(t *testing.T) {
+		active := &Gamestate{hp: 10, dungeon: []Card{{}}}
+		op := &Gamestate{hp: 5, dungeon: []Card{{}}}
+		if Check_win(active, op) != GAME_ON {
+			t.Error("expected GAME_ON")
+		}
+	})
+
+	t.Run("active dead, opponent alive", func(t *testing.T) {
+		active := &Gamestate{hp: 0, dungeon: []Card{{}}}
+		op := &Gamestate{hp: 1, dungeon: []Card{{}}}
+		if Check_win(active, op) != YOU_LOSE {
+			t.Error("expected YOU_LOSE")
+		}
+	})
+
+	t.Run("active alive, opponent dead", func(t *testing.T) {
+		active := &Gamestate{hp: 3, dungeon: []Card{{}}}
+		op := &Gamestate{hp: -2, dungeon: []Card{{}}}
+		if Check_win(active, op) != YOU_WIN {
+			t.Error("expected YOU_WIN")
+		}
+	})
+
+	t.Run("both dead", func(t *testing.T) {
+		active := &Gamestate{hp: 0, dungeon: []Card{{}}}
+		op := &Gamestate{hp: -1, dungeon: []Card{{}}}
+		if Check_win(active, op) != TIE {
+			t.Error("expected TIE when both hp <= 0")
+		}
+	})
+
+	t.Run("both dead exactly zero", func(t *testing.T) {
+		active := &Gamestate{hp: 0, dungeon: []Card{{}}}
+		op := &Gamestate{hp: 0, dungeon: []Card{{}}}
+		if Check_win(active, op) != TIE {
+			t.Error("expected TIE")
+		}
+	})
+
+	t.Run("empty dungeon, active higher HP", func(t *testing.T) {
+		active := &Gamestate{hp: 15, dungeon: nil} // len 0
+		op := &Gamestate{hp: 10, dungeon: nil}
+		if Check_win(active, op) != YOU_WIN {
+			t.Error("expected YOU_WIN on higher HP when deck empty")
+		}
+	})
+
+	t.Run("empty dungeon, active lower HP", func(t *testing.T) {
+		active := &Gamestate{hp: 5, dungeon: []Card{}}
+		op := &Gamestate{hp: 12, dungeon: []Card{}}
+		if Check_win(active, op) != YOU_LOSE {
+			t.Error("expected YOU_LOSE")
+		}
+	})
+
+	t.Run("empty dungeon, equal HP", func(t *testing.T) {
+		active := &Gamestate{hp: 20, dungeon: make([]Card, 0)}
+		op := &Gamestate{hp: 20, dungeon: make([]Card, 0)}
+		if Check_win(active, op) != TIE {
+			t.Error("expected TIE on equal HP when deck empty")
+		}
+	})
+
+	t.Run("hp zero but dungeon not empty – should still lose", func(t *testing.T) {
+		active := &Gamestate{hp: 0, dungeon: []Card{{}}}
+		op := &Gamestate{hp: 5, dungeon: []Card{{}}}
+		if Check_win(active, op) != YOU_LOSE {
+			t.Error("expected YOU_LOSE when hp 0 regardless of dungeon")
+		}
+	})
+
+	t.Run("negative HP", func(t *testing.T) {
+		active := &Gamestate{hp: -3, dungeon: []Card{{}}}
+		op := &Gamestate{hp: -5, dungeon: []Card{{}}}
+		if Check_win(active, op) != TIE {
+			t.Error("expected TIE when both negative")
+		}
 	})
 }

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"math/rand"
 	"slices"
 	"sync"
@@ -165,12 +166,11 @@ func draw(gast *Gamestate, amount int) []Card {
 	return new_cards
 }
 
-func click_card(active_gast *Gamestate, idx int) (clicked Card, valid bool) {
+func click_card(active_gast *Gamestate, idx int) (clicked Card, failed bool) {
 	if idx >= len(active_gast.dungeon) {
-		valid = false
+		failed = true
 		return
 	}
-	valid = true
 	clicked = active_gast.dungeon[idx]
 	active_gast.dungeon = slices.Delete(active_gast.dungeon, idx, idx+1)
 	// cards are an array of 4x13
@@ -280,6 +280,64 @@ func run_away(active_gast *Gamestate) (denied bool) {
 		denied = true
 	}
 	return
+}
+
+type WinState int
+
+const (
+	GAME_ON WinState = iota
+	YOU_WIN
+	YOU_LOSE
+	TIE
+)
+
+func (w WinState) String() string {
+	switch w {
+	case GAME_ON:
+		return "GAME_ON"
+	case YOU_WIN:
+		return "YOU_WIN"
+	case YOU_LOSE:
+		return "YOU_LOSE"
+	case TIE:
+		return "TIE"
+	default:
+		return fmt.Sprintf("WinState(%d)", w)
+	}
+}
+
+func Check_win(active_gast *Gamestate, op_gast *Gamestate) WinState {
+	// check hp
+	if active_gast.hp <= 0 {
+		// if both below 0, it's a tie
+		if op_gast.hp <= 0 {
+			return TIE
+		}
+
+		return YOU_LOSE
+	}
+
+	if op_gast.hp <= 0 {
+		return YOU_WIN
+	}
+
+	// else, check remaining cards
+	// INFO: the only time dungeon can be empty is when all cards have been played
+	// also, both player's deck always have the same size
+	if len(active_gast.dungeon) == 0 {
+		if active_gast.hp == op_gast.hp {
+			return TIE
+		}
+
+		if active_gast.hp > op_gast.hp {
+			return YOU_WIN
+		} else {
+			return YOU_LOSE
+		}
+	}
+
+	// else, the game continues
+	return GAME_ON
 }
 
 // client payload
