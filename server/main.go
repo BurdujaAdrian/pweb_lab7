@@ -89,7 +89,6 @@ type Store struct {
 var store Store
 
 func main() {
-	todo("Check game wincon")
 	Populate_cards_index()
 	Populate_default_deck()
 
@@ -114,6 +113,7 @@ func main() {
 			New_gamestate GameRepr     `json:"new_gamestate"`
 			Op_gamestate  OpGameRepr   `json:"op_gamestate"`
 			Action_result ActionResult `json:"action_result"`
+			Game_outcome  string       `json:"game_outcome"`
 		}
 		// end/leave a game
 		http.HandleFunc("DELETE /game/{role}/{id}", func(w http.ResponseWriter, r *http.Request) {
@@ -459,6 +459,19 @@ func main() {
 			opponent.Mutex.Unlock()
 
 			// endof step 6
+
+			// step 6a: check if the game didn't conclude, if it did,send signal to close the room
+			game_outcome := Check_win(player.gamestate, opponent.gamestate)
+			if game_outcome != GAME_ON {
+
+				room.quit_once.Do(func() { close(room.quit) })
+
+				store.SRoom_mutex.Lock()
+				delete(store.Started_room, room_id)
+				store.SRoom_mutex.Unlock()
+			}
+			result.Game_outcome = game_outcome.String()
+			// endof step 6a
 
 			// step 7: send the result
 			json.NewEncoder(w).Encode(result)
