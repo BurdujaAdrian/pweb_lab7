@@ -1,4 +1,4 @@
-const API = 'http://localhost:8080';
+const API = 'https://pweb-lab7.onrender.com';
 
 document.addEventListener('alpine:init', () => {
 Alpine.store('lobby', {

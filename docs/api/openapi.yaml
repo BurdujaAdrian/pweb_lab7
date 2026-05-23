@@ -10,6 +10,7 @@ info:
 
 servers:
   - url: http://localhost:8080
+  - url: https://pweb-lab7.onrender.com
 
 tags:
   - name: Auth
