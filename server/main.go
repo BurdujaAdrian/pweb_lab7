@@ -532,7 +532,7 @@ func main() {
 				if VerifyAdmin(jwt_claims) {
 					goto auth_end
 				}
-				if !Verify(jwt_claims, "PLAYER", host, 0) {
+				if !Verify(jwt_claims, "HOST", host, 0) {
 					w.WriteHeader(http.StatusForbidden)
 					return
 				}
@@ -684,7 +684,7 @@ func main() {
 					goto end_auth
 				}
 
-				if !Verify(jwt_claims, "PLAYER", guest, id) {
+				if !Verify(jwt_claims, "GUEST", guest, id) {
 					w.WriteHeader(http.StatusForbidden)
 					return
 				}
