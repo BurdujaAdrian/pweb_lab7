@@ -170,12 +170,12 @@ func main() {
 				}
 
 				if is_host {
-					if !Verify(jwt_claims, "HOST", room.Host.Name, id_string) {
+					if !Verify(jwt_claims, "HOST", room.Host.Name, id) {
 						w.WriteHeader(http.StatusForbidden)
 						return
 					}
 				} else {
-					if !Verify(jwt_claims, "GUEST", room.Guest.Name, id_string) {
+					if !Verify(jwt_claims, "GUEST", room.Guest.Name, id) {
 						w.WriteHeader(http.StatusForbidden)
 						return
 					}
@@ -256,12 +256,12 @@ func main() {
 				}
 
 				if is_host {
-					if !Verify(jwt_claims, "HOST", room.Host.Name, id_string) {
+					if !Verify(jwt_claims, "HOST", room.Host.Name, id) {
 						w.WriteHeader(http.StatusForbidden)
 						return
 					}
 				} else {
-					if !Verify(jwt_claims, "GUEST", room.Guest.Name, id_string) {
+					if !Verify(jwt_claims, "GUEST", room.Guest.Name, id) {
 						w.WriteHeader(http.StatusForbidden)
 						return
 					}
@@ -384,7 +384,7 @@ func main() {
 					return
 				}
 
-				if !Verify(jwt_claims, role, player.Name, room_id_string) {
+				if !Verify(jwt_claims, role, player.Name, room_id) {
 					w.WriteHeader(http.StatusForbidden)
 					return
 				}
@@ -532,7 +532,7 @@ func main() {
 				if VerifyAdmin(jwt_claims) {
 					goto auth_end
 				}
-				if !Verify(jwt_claims, "PLAYER", host, "0") {
+				if !Verify(jwt_claims, "PLAYER", host, 0) {
 					w.WriteHeader(http.StatusForbidden)
 					return
 				}
@@ -614,8 +614,8 @@ func main() {
 					goto auth_end
 				}
 
-				if !Verify(jwt_claims, "HOST", room.Host.Name, id_string) &&
-					!Verify(jwt_claims, "GUEST", room.Guest.Name, id_string) {
+				if !Verify(jwt_claims, "HOST", room.Host.Name, id) &&
+					!Verify(jwt_claims, "GUEST", room.Guest.Name, id) {
 					w.WriteHeader(http.StatusForbidden)
 					return
 				}
@@ -684,7 +684,7 @@ func main() {
 					goto end_auth
 				}
 
-				if !Verify(jwt_claims, "PLAYER", guest, id_string) {
+				if !Verify(jwt_claims, "PLAYER", guest, id) {
 					w.WriteHeader(http.StatusForbidden)
 					return
 				}
@@ -759,7 +759,7 @@ func main() {
 				}
 
 				// only the host and the guest themselves has the authority to remove the guest from the room
-				if !Verify(jwt_claims, "GUEST", old_room.Guest.Name, id_string) && !Verify(jwt_claims, "HOST", old_room.Host.Name, id_string) {
+				if !Verify(jwt_claims, "GUEST", old_room.Guest.Name, id) && !Verify(jwt_claims, "HOST", old_room.Host.Name, id) {
 					w.WriteHeader(http.StatusForbidden)
 					return
 				}
@@ -814,7 +814,7 @@ func main() {
 					goto delete_room
 				}
 
-				if !Verify(jwt_claims, "HOST", old_room.Host.Name, id_string) {
+				if !Verify(jwt_claims, "HOST", old_room.Host.Name, id) {
 					w.WriteHeader(http.StatusForbidden)
 					return
 				}

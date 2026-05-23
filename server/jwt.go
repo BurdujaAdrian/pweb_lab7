@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
@@ -34,6 +35,7 @@ func Token(w http.ResponseWriter, r *http.Request) {
 		"id":   body.Id,
 		"exp":  time.Now().Add(time.Minute).Unix(),
 	})
+	log.Print(token)
 
 	signed, err := token.SignedString(secret)
 	if err != nil {
@@ -46,15 +48,23 @@ func Token(w http.ResponseWriter, r *http.Request) {
 }
 
 func ExtractClaims(r *http.Request) jwt.MapClaims {
-	tokenStr := r.Header.Get("Authorization")
+	bearerStr := r.Header.Get("Authorization")
 
+	const prefix = "Bearer "
+	if !strings.HasPrefix(bearerStr, prefix) || len(bearerStr) <= len(prefix) {
+		log.Print("missing or malformed Authorization header")
+		return nil
+	}
+	tokenStr := bearerStr[len(prefix):]
 	token, err := jwt.Parse(tokenStr, func(t *jwt.Token) (any, error) {
 		return secret, nil
 	})
+	log.Print(token, err)
 	if err != nil || !token.Valid {
 		// w.WriteHeader(http.StatusUnauthorized)
 		return nil
 	}
+	log.Print(token)
 
 	claims := token.Claims.(jwt.MapClaims)
 
@@ -80,7 +90,7 @@ func VerifyAdmin(claims jwt.MapClaims) bool {
 	return true
 }
 
-func Verify(claims jwt.MapClaims, role string, name string, id string) bool {
+func Verify(claims jwt.MapClaims, role string, name string, id int) bool {
 	claim_role, exists := claims["role"].(string)
 	if !exists {
 		log.Println("Expected role to exist")
@@ -103,14 +113,19 @@ func Verify(claims jwt.MapClaims, role string, name string, id string) bool {
 		return false
 	}
 
-	claim_id, exists := claims["id"].(string)
-	if !exists {
-		log.Println("id doesn't exists")
-		return false
-	}
-
-	if claim_id != id {
-		log.Println("id doesn't match", id, claim_id)
+	switch v := claims["id"].(type) {
+	case float64:
+		if int(v) != id {
+			log.Println("id mismatch:", id, int(v))
+			return false
+		}
+	case int:
+		if v != id {
+			log.Println("id mismatch:", id, v)
+			return false
+		}
+	default:
+		log.Println("id missing or wrong type")
 		return false
 	}
 
