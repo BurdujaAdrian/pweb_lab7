@@ -6,6 +6,7 @@ import (
 	"log"
 	"maps"
 	"net/http"
+	"os"
 	"slices"
 	"strconv"
 	"sync"
@@ -89,6 +90,12 @@ type Store struct {
 var store Store
 
 func main() {
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8080" // fallback for local development
+	}
+	defer http.ListenAndServe(":"+port, nil)
+
 	Populate_cards_index()
 	Populate_default_deck()
 
@@ -804,5 +811,4 @@ func main() {
 		w.WriteHeader(http.StatusOK)
 	})
 
-	http.ListenAndServe(":8080", nil)
 }
