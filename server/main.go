@@ -14,6 +14,7 @@ import (
 )
 
 const AUTH = false
+const TIMEOUT_DUR = 300 // 5 minutes
 
 func todo(msg string) {
 	log.Print("TODO: ", msg)
@@ -197,6 +198,7 @@ func main() {
 		http.HandleFunc("GET /game/start/{role}/{id}", func(w http.ResponseWriter, r *http.Request) {
 			// step 0: get credentials
 			role := r.PathValue("role")
+			fmt.Println("step 0: got credentials for ", role)
 
 			id_string := r.PathValue("id")
 			id, err := strconv.Atoi(id_string)
@@ -224,6 +226,7 @@ func main() {
 				w.WriteHeader(http.StatusNotFound)
 				return
 			}
+			fmt.Println("Got room at id", id)
 
 			var player Player
 			var is_host bool = false
@@ -262,6 +265,23 @@ func main() {
 			}
 			// endof step 2
 
+			// step 3: wait for player randevouz, if timeout, abort operation
+			timeout := time.After(TIMEOUT_DUR * time.Second)
+
+			var response int
+			if is_host {
+				response = host_handshake(room, timeout)
+
+			} else {
+				response = guest_handshake(room, timeout)
+			}
+			if response != 0 {
+				fmt.Print("handshake response:", response)
+				w.WriteHeader(response)
+				return
+			}
+			// endof step 3
+
 			// step 4: move the room in the started rooms section if the host sent the request
 			if is_host {
 				store.Room_mutex.Lock()
@@ -277,22 +297,6 @@ func main() {
 				store.SRoom_mutex.Unlock()
 			}
 			// endof step 4
-
-			// step 3: wait for player randevouz, if timeout, abort operation
-			timeout := time.After(30 * time.Second)
-
-			var response int
-			if is_host {
-				response = host_handshake(room, timeout)
-
-			} else {
-				response = guest_handshake(room, timeout)
-			}
-			if response != 0 {
-				w.WriteHeader(response)
-				return
-			}
-			// endof step 3
 
 			// step 5: initialise game state with default values
 			reset(player.gamestate)
@@ -431,7 +435,7 @@ func main() {
 			// endof step 4
 
 			// step 5 : resolve opponents attack
-			timeout := time.After(30 * time.Second)
+			timeout := time.After(TIMEOUT_DUR * time.Second)
 			var op_card Card
 			select {
 			case op_card = <-player.comm:
@@ -674,15 +678,15 @@ func main() {
 				return
 			}
 
-			reset(target_room.Guest.gamestate)
-			reset(target_room.Host.gamestate)
-
 			target_room.Guest = Player{
 				new(sync.Mutex),
 				guest,
 				new(Gamestate),
 				make(chan Card, 1),
 			}
+
+			reset(target_room.Guest.gamestate)
+			reset(target_room.Host.gamestate)
 			store.Rooms[id] = target_room
 
 			target_room_json, _ := json.Marshal(target_room)

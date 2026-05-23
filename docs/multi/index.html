@@ -1,57 +1,440 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <script src="../packages/alpine_persist.min.js"></script>
+    <script defer src="../packages/alpine.min.js"></script>
     <link rel="stylesheet" href="../styles.css">
-    <script src="../packages/alpine.min.js" defer></script>
-    <script src="lobby.js"> </script>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>
+        .mp-board { display:flex; flex-direction:column; gap:12px; }
+        .mp-row   { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+        .mp-divider { border:none; border-top:2px dashed #555; margin:4px 0; }
+        .waiting-banner {
+            text-align:center; padding:12px;
+            background:#1a1a2e; color:#e0d7c6;
+            border-radius:6px; font-style:italic;
+        }
+        .op-row { flex-direction:row-reverse; }
+        .op-row .Deck { transform:rotate(180deg); }
+        .op-row .Deck p { transform:rotate(180deg); }
+        .last-played { opacity:0.75; }
+        .last-played-label { font-size:0.75em; color:#aaa; }
+    </style>
+    <script>
+    function parse_card(str) {
+        if (!str) return null;
+        for (const suit of ['clubs', 'diamonds', 'hearts', 'spades'])
+            if (str.startsWith(suit)) return { suit, card: str.slice(suit.length) };
+        return null;
+    }
+
+    document.addEventListener('alpine:init', () => {
+        Alpine.store('mp', {
+            // screens: setup | waiting | playing | waiting_turn | result
+            screen: 'setup',
+
+            name: '',
+            join_id: '',
+            room_id: null,
+            role: null,
+            error: '',
+            waiting_msg: '',
+
+            my: {
+                hp: 0, deck: 0,
+                weapon: null, equipped: false,
+                durability: [],   // local array of card objects (cards we blocked)
+                dungeon: [],      // array of card objects
+                healed: false, ran: false,
+            },
+            op: {
+                hp: 0, deck: 0,
+                weapon: null,
+                played_card: null,
+            },
+
+            _pending_toggle: false,
+            _last_weapon_str: '',
+            action_result: null,
+            game_outcome: '',
+
+            // ── card helpers (same logic as single-player) ────────────────
+            image(card) {
+                if (!card) return '../playing-cards/back_dark.png';
+                return `../playing-cards/${card.suit}_${card.card}.png`;
+            },
+
+            value(card) {
+                if (!card) return 0;
+                const n = Number(card.card);
+                if (!isNaN(n)) return n;
+                return { A:14, K:13, Q:12, J:11 }[card.card] || 0;
+            },
+
+            estimate(card) {
+                const v = this.value(card);
+                if (v <= 10) {
+                    if (card.suit === 'diamonds') return `Take ${card.card} of diamonds as weapon`;
+                    if (card.suit === 'hearts') {
+                        if (!this.my.healed) {
+                            const gain = Math.min(this.my.hp + v, 40) - this.my.hp;
+                            return `Recover ${gain} hp`;
+                        }
+                        return 'Already healed this turn, will heal for 0';
+                    }
+                }
+                if (this.my.weapon && this.my.equipped) {
+                    const top  = this.my.durability.at(-1);
+                    const block = this.value(this.my.weapon);
+                    const dur  = top ? this.value(top) : 15;
+                    if (v < dur) {
+                        const lost = Math.min(block - v, 0);
+                        return `Block! Lose ${Math.abs(lost)} hp`;
+                    }
+                    return `Can't block (${v}>=${dur}), lose ${v} hp`;
+                }
+                return `Lose ${v} hp`;
+            },
+
+            // ── apply server response ─────────────────────────────────────
+            apply(result) {
+                const gs = result.new_gamestate;
+                const op = result.op_gamestate;
+                const ar = result.action_result;
+
+                // weapon changed → reset local durability display
+                if (gs.weapon !== this._last_weapon_str) {
+                    this.my.durability = [];
+                    this._last_weapon_str = gs.weapon;
+                }
+
+                this.my.hp       = gs.hp;
+                this.my.deck     = gs.deck;
+                this.my.equipped = gs.equipped;
+                this.my.healed   = gs.healed;
+                this.my.ran      = gs.ran;
+                this.my.dungeon  = (gs.dungeon || []).map(parse_card).filter(Boolean);
+                this.my.weapon   = parse_card(gs.weapon);
+
+                // if we blocked the opponent's attack, record it in local durability
+                if (ar && ar.blocked && op.player_card) {
+                    const c = parse_card(op.player_card);
+                    if (c) {
+                        this.my.durability.push(c);
+                        if (this.my.durability.length > 4) this.my.durability.shift();
+                    }
+                }
+
+                this.op.hp          = op.hp;
+                this.op.deck        = op.deck;
+                this.op.weapon      = parse_card(op.weapon);
+                this.op.played_card = parse_card(op.player_card);
+
+                this.action_result   = ar;
+                this.game_outcome    = result.game_outcome || '';
+                this._pending_toggle = false;
+
+                this.screen = (this.game_outcome && this.game_outcome !== 'GAME_ON')
+                    ? 'result' : 'playing';
+            },
+
+            // ── lobby ─────────────────────────────────────────────────────
+            async create_room() {
+                if (!this.name.trim()) { this.error = 'Enter a name'; return; }
+                this.error = '';
+                try {
+                    const res = await fetch(`/room/${encodeURIComponent(this.name)}`, { method:'POST' });
+                    if (!res.ok) { this.error = await res.text(); return; }
+                    const data = await res.json();
+                    this.room_id = data.room_id;
+                    this.role = 'HOST';
+                    await this.start_game();
+                } catch(e) { this.error = String(e); }
+            },
+
+            async join_room() {
+                if (!this.name.trim()) { this.error = 'Enter a name'; return; }
+                const id = parseInt(this.join_id);
+                if (isNaN(id)) { this.error = 'Room ID must be a number'; return; }
+                this.error = '';
+                try {
+                    const res = await fetch(`/room/${encodeURIComponent(this.name)}/${id}`, { method:'PATCH' });
+                    if (!res.ok) { this.error = await res.text(); return; }
+                    this.room_id = id;
+                    this.role = 'GUEST';
+                    await this.start_game();
+                } catch(e) { this.error = String(e); }
+            },
+
+            async start_game() {
+                this.screen = 'waiting';
+                this.waiting_msg = this.role === 'HOST'
+                    ? `Room ${this.room_id} created — share this ID with your opponent.`
+                    : `Joined room ${this.room_id}. Waiting for host...`;
+                this._last_weapon_str = '';
+                this.my.durability   = [];
+                this._pending_toggle = false;
+                try {
+                    const res = await fetch(`/game/start/${this.role}/${this.room_id}`);
+                    if (!res.ok) { this.error = `Start failed (${res.status})`; this.screen = 'setup'; return; }
+                    this.apply(await res.json());
+                } catch(e) { this.error = String(e); this.screen = 'setup'; }
+            },
+
+            // ── in-game actions ───────────────────────────────────────────
+            toggle_weapon() {
+                if (this.screen !== 'playing') return;
+                this._pending_toggle = !this._pending_toggle;
+                this.my.equipped    = !this.my.equipped;
+            },
+
+            async click_card(idx) {
+                if (this.screen !== 'playing') return;
+                const toggle = this._pending_toggle;
+                this.screen      = 'waiting_turn';
+                this.waiting_msg = "Waiting for opponent's move...";
+                try {
+                    const res = await fetch(`/game/${this.role}/${this.room_id}`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ toggle_eapon: toggle, ran: false, clicked_card_index: idx }),
+                    });
+                    if (!res.ok) {
+                        this.error  = `Action failed (${res.status})`;
+                        this.screen = res.status === 410 ? 'result' : 'playing';
+                        return;
+                    }
+                    this.apply(await res.json());
+                } catch(e) { this.error = String(e); this.screen = 'playing'; }
+            },
+
+            async run_away() {
+                if (this.screen !== 'playing' || this.my.ran) return;
+                this.screen      = 'waiting_turn';
+                this.waiting_msg = 'Running away...';
+                try {
+                    const res = await fetch(`/game/${this.role}/${this.room_id}`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ toggle_eapon: false, ran: true, clicked_card_index: 0 }),
+                    });
+                    if (!res.ok) { this.error = `Failed (${res.status})`; this.screen = 'playing'; return; }
+                    this.apply(await res.json());
+                } catch(e) { this.error = String(e); this.screen = 'playing'; }
+            },
+
+            async leave() {
+                try { await fetch(`/game/${this.role}/${this.room_id}`, { method:'DELETE' }); } catch {}
+                this.screen = 'setup'; this.room_id = null; this.role = null; this.error = '';
+            },
+        });
+    });
+    </script>
 </head>
 <body>
-    <div class="Play-area" x-data>
-        <div class="Top-row" style="flex-direction: column; align-items:center; gap: 24px;">
+    <a href="../index.html"> &lt;-- Back </a>
 
-            <h1 style="letter-spacing: 0.15em; margin:0;">Lobby</h1>
+    <div x-data>
 
-            <div style="display:flex; gap:8px;">
-                <input
-                    type="text"
-                    placeholder="Your name"
-                    x-model="$store.lobby.username"
-                    style="padding: 8px 12px; border-radius:6px; border: 2px solid #e0d7c6; background:transparent; color:inherit; font-size:1rem;">
-                <button
-                    type="button"
-                    x-on:click="$store.lobby.createRoom()"
-                    :disabled="!$store.lobby.username"
-                    style="padding: 8px 20px; background:#e0d7c6; color:#1a1a2e; border:none; cursor:pointer; border-radius:6px;">
-                    Create Room
+        <!-- ══ SETUP ═══════════════════════════════════════════════════════ -->
+        <template x-if="$store.mp.screen === 'setup'">
+            <div class="Game">
+                <h2>Multiplayer Scoundrel</h2>
+                <div style="display:flex; flex-direction:column; gap:12px; max-width:320px;">
+                    <label>Your name
+                        <input type="text" x-model="$store.mp.name" placeholder="enter name"
+                            style="display:block; width:100%; margin-top:4px; padding:6px;">
+                    </label>
+                    <button type="button" @click="$store.mp.create_room()"
+                        style="padding:8px 20px;">
+                        Create Room (Host)
+                    </button>
+                    <hr style="border-color:#555;">
+                    <label>Room ID
+                        <input type="text" x-model="$store.mp.join_id" placeholder="room number"
+                            style="display:block; width:100%; margin-top:4px; padding:6px;">
+                    </label>
+                    <button type="button" @click="$store.mp.join_room()"
+                        style="padding:8px 20px;">
+                        Join Room (Guest)
+                    </button>
+                    <p x-show="$store.mp.error" x-text="$store.mp.error"
+                        style="color:red; margin:0;"></p>
+                </div>
+            </div>
+        </template>
+
+        <!-- ══ WAITING FOR GAME START ════════════════════════════════════ -->
+        <template x-if="$store.mp.screen === 'waiting'">
+            <div class="Game">
+                <div class="waiting-banner">
+                    <p x-text="$store.mp.waiting_msg"></p>
+                    <p>Waiting for opponent to connect…</p>
+                </div>
+            </div>
+        </template>
+
+        <!-- ══ PLAYING + WAITING FOR TURN (same board, different interactivity) -->
+        <template x-if="$store.mp.screen === 'playing' || $store.mp.screen === 'waiting_turn'">
+            <div class="Game">
+
+                <!-- header -->
+                <div style="display:flex; justify-content:space-between; align-items:center;">
+                    <span x-text="`${$store.mp.name} · ${$store.mp.role} · Room ${$store.mp.room_id}`"></span>
+                    <button type="button" @click="$store.mp.leave()">Leave</button>
+                </div>
+
+                <!-- waiting banner (shown only when waiting for opponent) -->
+                <template x-if="$store.mp.screen === 'waiting_turn'">
+                    <div class="waiting-banner" x-text="$store.mp.waiting_msg"></div>
+                </template>
+
+                <!-- last action result -->
+                <template x-if="$store.mp.action_result">
+                    <p x-text="
+                        $store.mp.action_result.failed   ? 'Invalid move!' :
+                        $store.mp.action_result.blocked  ? 'You blocked the attack!' :
+                        $store.mp.action_result.defended ? 'Tried to block but failed' : ''
+                    " style="min-height:1em;"></p>
+                </template>
+
+                <div class="mp-board">
+
+                    <!-- ── ROW 1: Opponent weapon + durability ────────────── -->
+                    <div class="Player-weapon mp-row">
+                        <p>Opponent Weapon:</p>
+                        <div class="Weapon-slot">
+                            <template x-if="$store.mp.op.weapon">
+                                <img :src="$store.mp.image($store.mp.op.weapon)"
+                                    style="transform:rotate(180deg);">
+                            </template>
+                            <template x-if="!$store.mp.op.weapon">
+                                <span style="color:#aaa;">none</span>
+                            </template>
+                        </div>
+                        <!-- opponent's last played card -->
+                        <template x-if="$store.mp.op.played_card">
+                            <div style="margin-left:24px;">
+                                <p class="last-played-label">Last played</p>
+                                <img :src="$store.mp.image($store.mp.op.played_card)"
+                                    class="last-played"
+                                    style="transform:rotate(180deg); width:60px;">
+                            </div>
+                        </template>
+                    </div>
+
+                    <!-- ── ROW 2: Opponent deck + dungeon (card backs) ─────── -->
+                    <div class="Top-row op-row">
+                        <!-- opponent deck info -->
+                        <div class="Deck">
+                            <img src="../playing-cards/back_dark.png">
+                            <p x-text="`Deck: ${$store.mp.op.deck}`"></p>
+                            <p x-text="`HP: ${$store.mp.op.hp}`"></p>
+                        </div>
+                        <!-- opponent dungeon: always 4 backs -->
+                        <div class="Dungeon-entities">
+                            <template x-for="i in [0,1,2,3]">
+                                <div>
+                                    <img src="../playing-cards/back_dark.png"
+                                        style="transform:rotate(180deg);">
+                                </div>
+                            </template>
+                        </div>
+                    </div>
+
+                    <hr class="mp-divider">
+
+                    <!-- ── ROW 3: My deck + dungeon ───────────────────────── -->
+                    <div class="Top-row">
+                        <!-- run away button doubles as deck display (same as single player) -->
+                        <button type="button"
+                            :disabled="$store.mp.screen !== 'playing' || $store.mp.my.ran || $store.mp.my.dungeon.length < 4"
+                            @click="$store.mp.run_away()">
+                            <div class="Deck">
+                                <img src="../playing-cards/back_dark.png">
+                                <p x-text="`Deck: ${$store.mp.my.deck}`"></p>
+                                <p x-text="`HP: ${$store.mp.my.hp}`"></p>
+                                <span>Run away</span>
+                            </div>
+                        </button>
+
+                        <div class="Dungeon-entities">
+                            <template x-for="(card, idx) in $store.mp.my.dungeon">
+                                <button type="button"
+                                    :disabled="$store.mp.screen !== 'playing'"
+                                    @click="$store.mp.click_card(idx)">
+                                    <div style="position:relative; display:inline-block;"
+                                        x-data="{ show: false }"
+                                        @mouseenter="show = true"
+                                        @mouseleave="show = false">
+                                        <img :src="$store.mp.image(card)">
+                                        <span x-show="show"
+                                            x-text="$store.mp.estimate(card)"
+                                            class="Card-tooltip"
+                                            style="position:absolute; background:black; color:white; padding:4px; z-index:1000; white-space:pre-line;">
+                                        </span>
+                                    </div>
+                                </button>
+                            </template>
+                        </div>
+                    </div>
+
+                    <!-- ── ROW 4: My weapon + durability ─────────────────── -->
+                    <div class="Player-weapon">
+                        <p>My Weapon:
+                            <template x-if="$store.mp.my.equipped">
+                                <span> (equipped)</span>
+                            </template>
+                        </p>
+                        <div class="Weapon-slot">
+                            <template x-if="$store.mp.my.weapon">
+                                <div>
+                                    <button type="button"
+                                        :disabled="$store.mp.screen !== 'playing'"
+                                        @click="$store.mp.toggle_weapon()">
+                                        <img :src="$store.mp.image($store.mp.my.weapon)">
+                                    </button>
+                                    <div class="Durability-stack">
+                                        <template x-for="(card, idx) in $store.mp.my.durability">
+                                            <img :src="$store.mp.image(card)"
+                                                :style="{
+                                                    transform: `translate(-${(idx+1)*40}px, 0px)`,
+                                                    zIndex: -(idx+1)
+                                                }">
+                                        </template>
+                                    </div>
+                                </div>
+                            </template>
+                            <template x-if="!$store.mp.my.weapon">
+                                <span style="color:#aaa;">none</span>
+                            </template>
+                        </div>
+                    </div>
+
+                </div><!-- end mp-board -->
+
+                <p x-show="$store.mp.error" x-text="$store.mp.error"
+                    style="color:red; margin-top:8px;"></p>
+            </div>
+        </template>
+
+        <!-- ══ RESULT ════════════════════════════════════════════════════ -->
+        <template x-if="$store.mp.screen === 'result'">
+            <div class="Game" style="text-align:center; padding:40px;">
+                <h2 x-text="
+                    $store.mp.game_outcome === 'YOU_WIN'  ? 'You Win!' :
+                    $store.mp.game_outcome === 'YOU_LOSE' ? 'You Lose!' :
+                    $store.mp.game_outcome === 'TIE'      ? 'Tie!' :
+                    'Game Over'
+                "></h2>
+                <p x-show="$store.mp.error" x-text="$store.mp.error" style="color:red;"></p>
+                <button type="button" @click="$store.mp.screen = 'setup'"
+                    style="padding:8px 20px; margin-top:12px;">
+                    Play Again
                 </button>
             </div>
+        </template>
 
-            <div style="display:flex; flex-direction:column; gap:8px; width:320px;">
-                <template x-if="$store.lobby.entries().length === 0">
-                    <p style="text-align:center; opacity:0.5;">No open rooms</p>
-                </template>
-
-                <template x-for="({id, room}) in $store.lobby.entries()" :key="id">
-                    <div style="display:flex; justify-content:space-between; align-items:center; padding:10px 14px; border: 2px solid #e0d7c6; border-radius:6px;">
-                        <span x-text="room.Host.Name + `'s room`"></span>
-                        <button
-                            type="button"
-                            :disabled="$store.lobby.isFull(room) || !$store.lobby.username || $store.lobby.username === room.Host.Name"
-                            x-on:click="$store.lobby.joinRoom(id, room.Host.Name)"
-                            x-text="$store.lobby.isFull(room) ? 'Full' : 'Join'"
-                            style="padding: 6px 14px; background:#e0d7c6; color:#1a1a2e; border:none; cursor:pointer; border-radius:6px;">
-                        </button>
-                    </div>
-                </template>
-            </div>
-
-        <button type="button" x-on:click="$store.lobby.leaveRoom()"
-            style="padding: 8px 20px; background:transparent; border: 2px solid #e0d7c6; color:inherit; border-radius:6px; cursor:pointer;">
-            ← Back
-        </button>
-
-        </div>
     </div>
 </body>
 </html>
