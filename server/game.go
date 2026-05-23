@@ -167,6 +167,10 @@ func draw(gast *Gamestate, amount int) []Card {
 }
 
 func click_card(active_gast *Gamestate, idx int) (clicked Card, failed bool) {
+	if active_gast == nil {
+		failed = true
+		return
+	}
 	if idx >= len(active_gast.dungeon) {
 		failed = true
 		return

@@ -417,10 +417,23 @@ func main() {
 			// endof step 2
 
 			// step 3: execute active player action
-			todo("figure out what to do with the outcome of the attack")
+
 			selected_card, failed := Execute_action(player.gamestate, action)
-			todo("figure out what to do when an ivalid action (click out of bounds) was commited by opponent")
 			// endof step 3
+
+			// step 3a: if the action failed, close the room
+			if failed {
+				room.quit_once.Do(func() { close(room.quit) })
+
+				store.SRoom_mutex.Lock()
+				delete(store.Started_room, room_id)
+				store.SRoom_mutex.Unlock()
+
+				w.WriteHeader(http.StatusExpectationFailed)
+				fmt.Fprintf(w, "Failed to execute action:%v", action)
+				return
+			}
+			// endof step 3a
 
 			// step 4: attack defending player
 
@@ -452,6 +465,9 @@ func main() {
 			{
 				blocked, defended = resolve_attack(player.gamestate, op_card)
 			}
+			// TODO: figure out what to do with the outcome of the attack
+			// figure out what to do when an ivalid action (click out of bounds) was commited by opponent
+
 			// now that I finished updating my gamestate after sending my op_card, I can safely unlock
 			player.Mutex.Unlock()
 			// endof step 5
