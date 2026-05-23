@@ -13,7 +13,7 @@ import (
 	"time"
 )
 
-const AUTH = false
+const AUTH = true
 const TIMEOUT_DUR = 300 // 5 minutes
 
 func todo(msg string) {
@@ -90,12 +90,16 @@ type Store struct {
 
 var store Store
 
+var internal_log string
+
 func main() {
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "8080" // fallback for local development
 	}
 	defer http.ListenAndServe(":"+port, nil)
+
+	Logger_init()
 
 	Populate_cards_index()
 	Populate_default_deck()
@@ -110,6 +114,8 @@ func main() {
 
 	// serve the frontend
 	http.Handle("/", http.FileServer(http.Dir("../docs/")))
+
+	http.HandleFunc("/logs", Log_buffer)
 
 	http.HandleFunc("POST /token", Token)
 
