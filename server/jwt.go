@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"log"
 	"net/http"
 	"time"
 
@@ -18,6 +19,7 @@ func Token(w http.ResponseWriter, r *http.Request) {
 		Id   int    `json:"id"`
 	}
 	json.NewDecoder(r.Body).Decode(&body)
+	defer log.Printf("/token {%v,%v,%v}\n", body.Id, body.Name, body.Role)
 
 	if body.Role == "ADMIN" {
 		if body.Name != admin_secret {
@@ -81,28 +83,34 @@ func VerifyAdmin(claims jwt.MapClaims) bool {
 func Verify(claims jwt.MapClaims, role string, name string, id string) bool {
 	claim_role, exists := claims["role"].(string)
 	if !exists {
+		log.Println("Expected role to exist")
 		return false
 	}
 
 	if role != claim_role {
+		log.Println("Role doesnt match", role, claim_role)
 		return false
 	}
 
 	claim_name, exists := claims["name"].(string)
 	if !exists {
+		log.Println("name doesn't exists")
 		return false
 	}
 
 	if name != claim_name {
+		log.Println("Name doesn't match", name, claim_name)
 		return false
 	}
 
 	claim_id, exists := claims["id"].(string)
 	if !exists {
+		log.Println("id doesn't exists")
 		return false
 	}
 
 	if claim_id != id {
+		log.Println("id doesn't match", id, claim_id)
 		return false
 	}
 

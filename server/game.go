@@ -189,6 +189,7 @@ func click_card(active_gast *Gamestate, idx int) (clicked Card, failed bool) {
 			{ // take weapon
 				active_gast.weapon = clicked
 				// 0 durability means no dur
+				active_gast.equipped = true
 				active_gast.durability = 0
 
 				// greater then 0 weapon id means equipped
