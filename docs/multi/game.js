@@ -1,197 +1,280 @@
-document.addEventListener('alpine:init', () => {
-const cards = ['A','2','3','4','5','6','7','8','9','10','J','Q','K'];
-const suits = ['clubs','diamonds','hearts','spades'];
-const valid_cards = cards.flatMap( card => suits.map(suit => ({ card, suit }))).filter(
-			el=> {
-				const legal = !(isNaN(Number(el.card)) && (el.suit == 'hearts' || el.suit=='diamonds'));
-				if(!legal) console.log(el);
-				return legal
-			}
-		);
+function pvpGame() {
+  return {
+    state: 'lobby',
+    name: '',
+    joinId: '',
+    roomId: null,
+    role: '',
+    error: '',
+    waitMsg: '',
+    pendingToggle: false,
+    token: '',   // JWT token for authorized requests
 
-const saved = localStorage.getItem('gameState');
-console.log("Gamestate in localStorage:",saved);
-function new_gamestate() { 
-	return {
-		// gamestate
-		deck: valid_cards.toSorted(() => Math.random() - 0.5),
-		weapon: null,
-		durability: [],
-		equipped: true,
-		ran: false,
-		healed: false,
-		dungeon: [],
-		hp:20,
+    my: {
+      hp: 20, deck: 0, weapon: null, equipped: false,
+      durability: [], dungeon: [], healed: false, ran: false
+    },
+    op: {
+      hp: 20, deck: 0, weapon: null, played: null
+    },
+    gameOutcome: '',
+    actionResult: null,
 
-	};
+    // ---- persistence ----
+    saveToStorage() {
+      const data = {
+        name: this.name,
+        roomId: this.roomId,
+        role: this.role,
+        state: this.state,
+        token: this.token,
+      };
+      localStorage.setItem('scoundrel_pvp', JSON.stringify(data));
+    },
+    loadFromStorage() {
+      const raw = localStorage.getItem('scoundrel_pvp');
+      if (!raw) return false;
+      try {
+        const data = JSON.parse(raw);
+        if (data.roomId && data.role && data.state !== 'lobby') {
+          this.name = data.name || '';
+          this.roomId = data.roomId;
+          this.role = data.role;
+          this.token = data.token || '';
+          if (data.state === 'waiting') {
+            this.state = 'waiting';
+            this.waitMsg = `Resuming room ${this.roomId}...`;
+            this.waitForStart();
+            return true;
+          }
+          if (data.state === 'playing' || data.state === 'waiting_turn') {
+            this.state = 'waiting';
+            this.waitMsg = `Reconnecting to room ${this.roomId}...`;
+            this.waitForStart();
+            return true;
+          }
+        }
+      } catch (e) {}
+      return false;
+    },
+    clearStorage() {
+      localStorage.removeItem('scoundrel_pvp');
+    },
+
+    // ---- auth helper ----
+    async fetchToken(role, roomId = '0') {
+      try {
+        const res = await fetch('/token', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ role, name: this.name, id: roomId || "0" }),
+        });
+        if (!res.ok) throw new Error(await res.text());
+        const data = await res.json();
+        this.token = data.token;
+        this.saveToStorage();
+      } catch (e) {
+        throw new Error('Failed to get token: ' + e.message);
+      }
+    },
+
+    // ---- helpers ----
+    cardImage(cardStr) {
+      if (!cardStr) return '';
+      const match = cardStr.match(/^(clubs|diamonds|hearts|spades)(.+)$/);
+      if (!match) return '';
+      const suit = match[1];
+      const rank = match[2];
+      return `../playing-cards/${suit}_${rank}.png`;
+    },
+    cardValue(cardStr) {
+      if (!cardStr) return 0;
+      const rank = cardStr.replace(/^(clubs|diamonds|hearts|spades)/, '');
+      const map = { A:14, K:13, Q:12, J:11 };
+      return map[rank] || parseInt(rank) || 0;
+    },
+
+    // ---- API wrapper (adds auth header) ----
+    async request(path, options = {}) {
+      const headers = { ...options.headers };
+      if (this.token) {
+        headers['Authorization'] = 'Bearer ' + this.token;
+      }
+      const res = await fetch(path, { ...options, headers });
+      if (!res.ok) {
+        const text = await res.text();
+        throw new Error(text || res.statusText);
+      }
+      return res.json();
+    },
+
+    // ---- lobby actions ----
+    async createRoom() {
+      if (!this.name.trim()) { this.error = 'Enter a name'; return; }
+      this.error = '';
+      try {
+        // get a PLAYER token
+        await this.fetchToken('HOST');
+        const data = await this.request(`/room/${encodeURIComponent(this.name)}`, { method: 'POST' });
+        this.roomId = data.room_id;
+        this.role = 'HOST';
+        this.state = 'waiting';
+        this.waitMsg = `Room ${this.roomId} created. Share this ID with your opponent.`;
+        this.saveToStorage();
+        await this.waitForStart();
+      } catch (e) { this.error = e.message; }
+    },
+
+    async joinRoom() {
+      if (!this.name.trim()) { this.error = 'Enter a name'; return; }
+      const id = parseInt(this.joinId);
+      if (isNaN(id)) { this.error = 'Room ID must be a number'; return; }
+      this.error = '';
+      try {
+        await this.fetchToken('GUEST');
+        await this.request(`/room/${encodeURIComponent(this.name)}/${id}`, { method: 'PATCH' });
+        this.roomId = id;
+        this.role = 'GUEST';
+        this.state = 'waiting';
+        this.waitMsg = `Joined room ${id}. Waiting for host to start...`;
+        this.saveToStorage();
+        await this.waitForStart();
+      } catch (e) { this.error = e.message; }
+    },
+
+    async waitForStart() {
+      try {
+        const result = await this.request(`/game/start/${this.role}/${this.roomId}`);
+        this.applyState(result);
+        this.saveToStorage();
+      } catch (e) {
+        this.error = e.message;
+        this.state = 'lobby';
+        this.clearStorage();
+      }
+    },
+
+    applyState(result) {
+      const gs = result.new_gamestate;
+      const op = result.op_gamestate;
+      const ar = result.action_result;
+      const outcome = result.game_outcome;
+
+      this.my.hp = gs.hp;
+      this.my.deck = gs.deck;
+      this.my.equipped = gs.equipped;
+      this.my.healed = gs.healed;
+      this.my.ran = gs.ran;
+      this.my.dungeon = (gs.dungeon || []).map(c => c);
+      this.my.weapon = gs.weapon || null;
+
+      if (ar && ar.blocked && op.player_card) {
+        this.my.durability.push(op.player_card);
+        if (this.my.durability.length > 4) this.my.durability.shift();
+      } else if (gs.weapon !== this.my.weapon) {
+        this.my.durability = [];
+      }
+
+      this.op.hp = op.hp;
+      this.op.deck = op.deck;
+      this.op.weapon = op.weapon || null;
+      this.op.played = op.player_card || null;
+      this.actionResult = ar;
+      this.gameOutcome = outcome || 'GAME_ON';
+
+      if (this.gameOutcome !== 'GAME_ON') {
+        this.gameOver = true;                    // <-- new flag
+        this.state = 'playing';                  // keep board visible, disable clicks via gameOver
+      } else {
+        this.state = 'playing';
+      }
+      this.pendingToggle = false;
+      this.saveToStorage();
+    }
+
+    async clickCard(idx) {
+      if (this.state !== 'playing' || this.gameOver) return;
+      this.state = 'waiting_turn';
+      try {
+        const body = {
+          toggle_eapon: this.pendingToggle,
+          ran: false,
+          clicked_card_index: idx
+        };
+        const result = await this.request(`/game/${this.role}/${this.roomId}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body)
+        });
+        this.applyState(result);
+      } catch (e) {
+        this.error = e.message;
+        if (e.message.includes('Gone')) {
+          this.state = 'result';
+          this.gameOutcome = 'TIE';
+        } else {
+          this.state = 'playing';
+        }
+      }
+    },
+
+    async runAway() {
+      if (this.state !== 'playing' || this.gameOver || this.my.ran || this.my.dungeon.length < 4) return;
+      this.state = 'waiting_turn';
+      try {
+        const body = {
+          toggle_eapon: false,
+          ran: true,
+          clicked_card_index: 0
+        };
+        const result = await this.request(`/game/${this.role}/${this.roomId}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body)
+        });
+        this.applyState(result);
+      } catch (e) {
+        this.error = e.message;
+        this.state = 'playing';
+      }
+    },
+
+    toggleWeapon() {
+      if (this.state !== 'playing' || this.gameOver) return;
+      this.pendingToggle = !this.pendingToggle;
+      this.my.equipped = !this.my.equipped;
+    },
+
+    async leaveGame() {
+      try {
+        await this.request(`/game/${this.role}/${this.roomId}`, { method: 'DELETE' });
+      } catch (e) {}
+      this.resetToLobby();
+    },
+
+    resetToLobby() {
+      this.state = 'lobby';
+      this.roomId = null;
+      this.role = '';
+      this.error = '';
+      this.pendingToggle = false;
+      this.token = '';
+      this.my = { hp:20, deck:0, weapon:null, equipped:false, durability:[], dungeon:[], healed:false, ran:false };
+      this.op = { hp:20, deck:0, weapon:null, played:null };
+      this.gameOutcome = '';
+      this.clearStorage();
+    },
+
+    get outcomeText() {
+      return this.gameOutcome === 'YOU_WIN' ? '🏆 You Win!' :
+             this.gameOutcome === 'YOU_LOSE' ? '💀 You Lose' :
+             this.gameOutcome === 'TIE' ? '🤝 Tie' : 'Game Over';
+    },
+
+    init() {
+      if (!this.loadFromStorage()) {
+        this.state = 'lobby';
+      }
+    }
+  };
 }
-var gamestate = saved? JSON.parse(saved): new_gamestate()
-Alpine.store('game', {
-		...gamestate,
-		// game functions 
-		save(){
-			console.log("Game saved");
-			localStorage.setItem('gameState', JSON.stringify({
-				deck:this.deck,
-				weapon:this.weapon,
-				durability:this.durability,
-				equipped:this.equipped,
-				ran:this.ran,
-				healed:this.healed,
-				dungeon:this.dungeon,
-				hp:this.hp,
-			}))
-		},
-		image(card) { return "../playing-cards/" + card.suit + "_" + card.card + ".png" },
-		value(card) {
-				if( !isNaN(Number(card)) ){ return Number(card) }
-
-				if (card == 'A'){ return 14}
-				if (card == 'K'){ return 13}
-				if (card == 'Q'){ return 12}
-				if (card == 'J'){ return 11}
-
-				return 0;
-		},
-
-		// game methods
-		draw(x) {
-			const drawn = this.deck.slice(0, x);
-			this.deck = this.deck.slice(x);
-			return drawn;
-		},
-		estimate(card){
-			const game = Alpine.store('game');
-			const value = game.value(card.card);
-
-			// only numeric cards have special purposes
-			// also there are no diamonds/hearts with value above 10
-			if(value <= 10){
-				if(card.suit == 'diamonds'){
-					// take up as weapon
-					return `Take ${card.card} of ${card.suit} as weapon`;
-				}
-
-				if(card.suit == 'hearts'){
-					// heal
-					if(!this.healed){
-						const new_hp = Math.min((this.hp + value) , 20);
-						const hp_rec = new_hp - this.hp
-						return `Recover ${hp_rec} hp`;
-					} else {
-						return "Already healed this turn,\nyou will heal for 0";
-					}
-				}
-				// else combat
-			}
-
-			// battle with weapon
-			if(this.weapon != null && this.equipped) {
-				// has weapon and is equipped
-				const top = this.durability.at(-1);
-				const block = game.value(this.weapon.card)
-
-				var dur = 15;
-				if(top != null){ dur = game.value(top.card); }
-
-				if(value < dur){
-					// can block with weapon
-					const lost_hp = Math.min( block - value , 0); // if value < block, take 0 damage rahter then healing
-
-					const msg = `Will lose ${lost_hp} hp`
-					return msg;
-				} else {
-					const lost_hp = value;
-					const msg = `Can't block, too little durability: ${dur}<${value}\nWill lose ${lost_hp} hp`;
-					return msg;
-				}
-
-			} 
-
-			// bare-handed combat
-			const lost_hp = value;
-			const msg =  `Will lose ${lost_hp} hp`;
-			return msg;
-		},
-		click_card(idx) {
-			// remove element at idx
-			const clicked = this.dungeon.splice(idx,1)[0];
-			const game = Alpine.store('game');
-			const value = game.value(clicked.card);
-
-			// replenish cards
-			if(this.dungeon.length == 1){
-				this.dungeon.push(...game.draw(3));
-				// rest once per turn effects
-				this.healed = false;
-				this.ran = false;
-			}
-
-			// only non-numeric cards have special purposes
-			if(value <= 10){
-				if(clicked.suit == 'diamonds'){
-					// take up as weapon
-					this.weapon = clicked;
-					this.durability = []; // reset durability
-					this.equipped = true; //default to equipping the weapon
-					return;
-				}
-
-				if(clicked.suit == 'hearts'){
-					// heal
-					if(!this.healed){
-						this.hp = Math.min((this.hp + value) , 20);
-						this.healed = true;
-					} else {
-					}
-					return;
-				}
-				// else combat
-			}
-
-			// battle
-			if(this.weapon != null && this.equipped) {
-				// has weapon and is equipped
-				const top = this.durability.at(-1);
-				const block = game.value(this.weapon.card)
-
-				var dur = 15;
-				if(top != null){ dur = game.value(top.card); }
-
-				if(value < dur){
-					// can block with weapon
-					this.hp = this.hp + Math.min( block - value , 0); // if value < block, take 0 damage rahter then healing
-
-					this.durability.push(clicked);
-					if(this.durability.length > 4) this.durability.shift();
-					return;
-				} else {
-				}
-
-			} 
-
-			// bare-handed combat
-			this.hp = this.hp - value;
-			return
-		},
-		reset(){
-			this.deck = valid_cards.toSorted(() => Math.random() - 0.5);
-			this.dungeon = Alpine.store('game').draw(4);
-			this.weapon = null;
-			this.durability = [];
-			this.equipped = false;
-			this.hp = 20;
-			this.ran =  false;
-			this.healed =  false;
-		},
-		run_away(){
-			if(!this.ran){
-				this.deck.push(...this.dungeon);
-				this.dungeon = Alpine.store('game').draw(4);
-				this.ran = true;
-			} else {
-			}
-		}
-
-});
-});
