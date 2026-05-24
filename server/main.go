@@ -4,10 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
-	"maps"
 	"net/http"
 	"os"
-	"slices"
 	"strconv"
 	"sync"
 	"time"
@@ -204,7 +202,6 @@ func main() {
 		http.HandleFunc("GET /game/start/{role}/{id}", func(w http.ResponseWriter, r *http.Request) {
 			// step 0: get credentials
 			role := r.PathValue("role")
-			fmt.Println("step 0: got credentials for ", role)
 
 			id_string := r.PathValue("id")
 			id, err := strconv.Atoi(id_string)
@@ -322,6 +319,87 @@ func main() {
 			// endof step 6
 		})
 
+		// request the current gamestate of a player
+		http.HandleFunc("GET /game/{role}/{room_id}", func(w http.ResponseWriter, r *http.Request) {
+			// step 0: retrieve room information
+			room_id_string := r.PathValue("room_id")
+			room_id, err := strconv.Atoi(room_id_string)
+			if err != nil {
+				w.WriteHeader(http.StatusBadRequest)
+				fmt.Fprint(w, "Room_id must be a valid integer")
+				return
+			}
+			role := r.PathValue("role")
+
+			defer log.Printf("(/%v %v) game/%v/%v", r.Method, r.Host, role, room_id)
+
+			var room *Room
+			var exists bool
+			store.SRoom_mutex.RLock()
+			{
+				room, exists = store.Started_room[room_id]
+			}
+			store.SRoom_mutex.RUnlock()
+
+			// theres a small chance the guest has sent an action before the room was moved to started rooms
+			if !exists {
+				w.WriteHeader(http.StatusNotFound)
+				return
+			}
+			// endof step 0
+
+			// step 1: retrive player information
+			var player Player
+			var opponent Player
+			switch role {
+			case "HOST":
+				player = room.Host
+				opponent = room.Guest
+			case "GUEST":
+				player = room.Guest
+				opponent = room.Host
+			default:
+				{
+					w.WriteHeader(http.StatusBadRequest)
+					fmt.Fprintf(w, "Role [%v] doesn't exist, use [host] or [guest]", role)
+					return
+				}
+			}
+
+			if AUTH { // verify player id via jwt
+				jwt_claims := ExtractClaims(r)
+				if jwt_claims == nil {
+					w.WriteHeader(http.StatusUnauthorized)
+					return
+				}
+
+				if !Verify(jwt_claims, role, player.Name, room_id) {
+					w.WriteHeader(http.StatusForbidden)
+					return
+				}
+
+				// else, free to go
+			}
+			// endof step 1
+
+			// step 6: package the new gamestate and send it
+
+			result := Result{}
+			result.Action_result = ActionResult{false, false, false}
+			result.New_gamestate = format_gamestate(player.gamestate)
+
+			// to make sure I read opponents gamestate only after they've finished updating theirs
+			opponent.Mutex.Lock()
+			{
+				result.Op_gamestate = format_op_gamestate(opponent.gamestate, Card{})
+			}
+			opponent.Mutex.Unlock()
+			// endof step 6
+
+			// step 7: send the result
+			json.NewEncoder(w).Encode(result)
+			// endof step 7
+		})
 		// register actions/commands from players and returns state of the game after action
 		http.HandleFunc("POST /game/{role}/{room_id}", func(w http.ResponseWriter, r *http.Request) {
 			// step 0: retrieve room information
@@ -653,7 +731,7 @@ func main() {
 				// else, free to go
 			}
 			store.Room_mutex.RLock()
-			Rooms_json, _ := json.Marshal(slices.Collect(maps.Values(store.Rooms)))
+			Rooms_json, _ := json.Marshal(store.Rooms)
 			store.Room_mutex.RUnlock()
 
 			w.Write(Rooms_json)

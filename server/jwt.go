@@ -33,9 +33,8 @@ func Token(w http.ResponseWriter, r *http.Request) {
 		"role": body.Role,
 		"name": body.Name,
 		"id":   body.Id,
-		"exp":  time.Now().Add(time.Minute).Unix(),
+		"exp":  time.Now().Add(time.Minute * 5).Unix(),
 	})
-	log.Print(token)
 
 	signed, err := token.SignedString(secret)
 	if err != nil {
@@ -52,19 +51,18 @@ func ExtractClaims(r *http.Request) jwt.MapClaims {
 
 	const prefix = "Bearer "
 	if !strings.HasPrefix(bearerStr, prefix) || len(bearerStr) <= len(prefix) {
-		log.Print("missing or malformed Authorization header")
+		log.Print("missing or malformed Authorization header:", bearerStr)
 		return nil
 	}
 	tokenStr := bearerStr[len(prefix):]
 	token, err := jwt.Parse(tokenStr, func(t *jwt.Token) (any, error) {
 		return secret, nil
 	})
-	log.Print(token, err)
+	log.Print(token.Claims, err)
 	if err != nil || !token.Valid {
 		// w.WriteHeader(http.StatusUnauthorized)
 		return nil
 	}
-	log.Print(token)
 
 	claims := token.Claims.(jwt.MapClaims)
 

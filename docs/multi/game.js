@@ -7,8 +7,11 @@ function pvpGame() {
     role: '',
     error: '',
     waitMsg: '',
-    pendingToggle: false,
-    token: '',   // JWT token for authorized requests
+    rooms: [],
+    viewerToken: '',
+    polling_rooms: true,
+    token: '',
+    gameOver: false,
 
     my: {
       hp: 20, deck: 0, weapon: null, equipped: false,
@@ -20,7 +23,7 @@ function pvpGame() {
     gameOutcome: '',
     actionResult: null,
 
-    // ---- persistence ----
+    // ---------- persistence ----------
     saveToStorage() {
       const data = {
         name: this.name,
@@ -41,6 +44,7 @@ function pvpGame() {
           this.roomId = data.roomId;
           this.role = data.role;
           this.token = data.token || '';
+          this.viewerToken = data.viewerToken || '';
           if (data.state === 'waiting') {
             this.state = 'waiting';
             this.waitMsg = `Resuming room ${this.roomId}...`;
@@ -50,7 +54,7 @@ function pvpGame() {
           if (data.state === 'playing' || data.state === 'waiting_turn') {
             this.state = 'waiting';
             this.waitMsg = `Reconnecting to room ${this.roomId}...`;
-            this.waitForStart();
+            this.resumeGame();
             return true;
           }
         }
@@ -61,24 +65,43 @@ function pvpGame() {
       localStorage.removeItem('scoundrel_pvp');
     },
 
-    // ---- auth helper ----
+    // ---------- auth ----------
     async fetchToken(role, roomId = '0') {
       try {
         const res = await fetch('/token', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ role, name: this.name, id: roomId || "0" }),
+          body: JSON.stringify({ role, name: this.name, id: roomId }),
         });
         if (!res.ok) throw new Error(await res.text());
         const data = await res.json();
-        this.token = data.token;
-        this.saveToStorage();
+        return data.token;
+        // this.token = data.token;
+        // this.saveToStorage();
       } catch (e) {
         throw new Error('Failed to get token: ' + e.message);
       }
     },
 
-    // ---- helpers ----
+    // ---------- API helper ----------
+    async request(path, options = {}, token = null) {
+      const headers = { ...options.headers };
+      if (token) {
+        headers['Authorization'] = 'Bearer ' + token;
+      } else if (this.token){
+        headers['Authorization'] = 'Bearer ' + this.token;
+      } else {
+        throw new Error("Missing token from both request and this.token");
+      }
+      const res = await fetch(path, { ...options, headers });
+      if (!res.ok) {
+        const text = await res.text();
+        throw new Error(text || res.statusText);
+      }
+      return res.json();
+    },
+
+    // ---------- card helpers ----------
     cardImage(cardStr) {
       if (!cardStr) return '';
       const match = cardStr.match(/^(clubs|diamonds|hearts|spades)(.+)$/);
@@ -94,28 +117,34 @@ function pvpGame() {
       return map[rank] || parseInt(rank) || 0;
     },
 
-    // ---- API wrapper (adds auth header) ----
-    async request(path, options = {}) {
-      const headers = { ...options.headers };
-      if (this.token) {
-        headers['Authorization'] = 'Bearer ' + this.token;
+    // ---------- room list ----------
+    async fetchRooms() {
+      try {
+        // get VIEWER token if we don't have one
+        if (!this.viewerToken) {
+          this.viewerToken = await this.fetchToken('VIEWER', '0');
+        }
+        const data = await this.request('/room', {}, this.viewerToken);
+        // data is an array of room objects: { Host: {Name, ...}, Guest: {Name, ...} }
+        // map to simpler structure with id
+        this.rooms = Object.entries(data).map(([id, room]) => ({
+          id: parseInt(id),
+          host: room.Host?.Name || '?',
+          guest: room.Guest?.Name || '',
+        }));
+      } catch (e) {
+        this.error = 'Failed to load rooms: ' + e.message;
       }
-      const res = await fetch(path, { ...options, headers });
-      if (!res.ok) {
-        const text = await res.text();
-        throw new Error(text || res.statusText);
-      }
-      return res.json();
     },
 
-    // ---- lobby actions ----
+    // ---------- lobby ----------
     async createRoom() {
       if (!this.name.trim()) { this.error = 'Enter a name'; return; }
       this.error = '';
       try {
-        // get a PLAYER token
-        await this.fetchToken('HOST');
+        this.token = await this.fetchToken('HOST', '0');
         const data = await this.request(`/room/${encodeURIComponent(this.name)}`, { method: 'POST' });
+        this.token = await this.fetchToken('HOST', data.room_id);
         this.roomId = data.room_id;
         this.role = 'HOST';
         this.state = 'waiting';
@@ -125,13 +154,11 @@ function pvpGame() {
       } catch (e) { this.error = e.message; }
     },
 
-    async joinRoom() {
+    async joinRoom(id) {
       if (!this.name.trim()) { this.error = 'Enter a name'; return; }
-      const id = parseInt(this.joinId);
-      if (isNaN(id)) { this.error = 'Room ID must be a number'; return; }
       this.error = '';
       try {
-        await this.fetchToken('GUEST');
+        this.token = await this.fetchToken('GUEST', id);
         await this.request(`/room/${encodeURIComponent(this.name)}/${id}`, { method: 'PATCH' });
         this.roomId = id;
         this.role = 'GUEST';
@@ -141,12 +168,28 @@ function pvpGame() {
         await this.waitForStart();
       } catch (e) { this.error = e.message; }
     },
+    async leaveRoom() {
+      try {
+        await this.request(`/room/${this.roomId}`, { method: 'DELETE' });
+      } catch (e) {}
+      this.resetToLobby();
+    },
 
     async waitForStart() {
       try {
         const result = await this.request(`/game/start/${this.role}/${this.roomId}`);
         this.applyState(result);
-        this.saveToStorage();
+      } catch (e) {
+        this.error = e.message;
+        this.state = 'lobby';
+        this.clearStorage();
+      }
+    },
+
+    async resumeGame() {
+      try {
+        const result = await this.request(`/game/${this.role}/${this.roomId}`);
+        this.applyState(result);
       } catch (e) {
         this.error = e.message;
         this.state = 'lobby';
@@ -160,6 +203,13 @@ function pvpGame() {
       const ar = result.action_result;
       const outcome = result.game_outcome;
 
+      if (ar && ar.blocked && op.player_card) {
+        this.my.durability.push(op.player_card);
+        if (this.my.durability.length > 4) this.my.durability.shift();
+      } else if (gs.weapon != this.my.weapon) {
+        this.my.durability = [];
+      }
+
       this.my.hp = gs.hp;
       this.my.deck = gs.deck;
       this.my.equipped = gs.equipped;
@@ -168,12 +218,6 @@ function pvpGame() {
       this.my.dungeon = (gs.dungeon || []).map(c => c);
       this.my.weapon = gs.weapon || null;
 
-      if (ar && ar.blocked && op.player_card) {
-        this.my.durability.push(op.player_card);
-        if (this.my.durability.length > 4) this.my.durability.shift();
-      } else if (gs.weapon !== this.my.weapon) {
-        this.my.durability = [];
-      }
 
       this.op.hp = op.hp;
       this.op.deck = op.deck;
@@ -183,15 +227,16 @@ function pvpGame() {
       this.gameOutcome = outcome || 'GAME_ON';
 
       if (this.gameOutcome !== 'GAME_ON') {
-        this.gameOver = true;                    // <-- new flag
-        this.state = 'playing';                  // keep board visible, disable clicks via gameOver
+        this.gameOver = true;
+        this.state = 'playing';   // keep board visible, clicks disabled by gameOver flag
       } else {
         this.state = 'playing';
       }
       this.pendingToggle = false;
       this.saveToStorage();
-    }
+    },
 
+    // ---------- in‑game actions ----------
     async clickCard(idx) {
       if (this.state !== 'playing' || this.gameOver) return;
       this.state = 'waiting_turn';
@@ -210,8 +255,9 @@ function pvpGame() {
       } catch (e) {
         this.error = e.message;
         if (e.message.includes('Gone')) {
-          this.state = 'result';
+          this.gameOver = true;
           this.gameOutcome = 'TIE';
+          this.state = 'playing';
         } else {
           this.state = 'playing';
         }
@@ -259,6 +305,7 @@ function pvpGame() {
       this.error = '';
       this.pendingToggle = false;
       this.token = '';
+      this.gameOver = false;
       this.my = { hp:20, deck:0, weapon:null, equipped:false, durability:[], dungeon:[], healed:false, ran:false };
       this.op = { hp:20, deck:0, weapon:null, played:null };
       this.gameOutcome = '';
@@ -274,6 +321,7 @@ function pvpGame() {
     init() {
       if (!this.loadFromStorage()) {
         this.state = 'lobby';
+        this.fetchRooms();
       }
     }
   };
