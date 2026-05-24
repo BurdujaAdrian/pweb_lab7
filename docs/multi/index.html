@@ -19,10 +19,17 @@
         </label>
         <button @click="createRoom()" :disabled="!name.trim()">🎮 Create Room</button>
         <div class="divider"></div>
-        <label>Room ID to join
-          <input type="text" x-model="joinId" placeholder="e.g. 42">
-        </label>
-        <button @click="joinRoom()" :disabled="!name.trim() || !joinId.trim()">🚪 Join Room</button>
+        <button @click="fetchRooms()" class="secondary" style="margin-bottom:10px;">Refresh Rooms</button>
+        <p style="color:#aaa; font-size:0.9em;">Open rooms:</p>
+        <template x-if="rooms.length === 0">
+          <p style="color:#555; font-size:0.85em;">No open rooms…</p>
+        </template>
+        <template x-for="room in rooms">
+          <div style="display:flex; justify-content:space-between; align-items:center; padding:8px 12px; background:#2a2a4a; border-radius:6px;">
+            <span x-text="room.host ? room.host : 'Unknown'"></span>
+            <button @click="joinRoom(room.id)" :disabled="!name.trim()" style="padding:6px 14px; font-size:0.85em;">Join</button>
+          </div>
+        </template>
         <p class="error" x-text="error" x-show="error"></p>
       </div>
     </div>
@@ -33,7 +40,7 @@
     <div class="panel waiting-banner">
       <p x-text="waitMsg"></p>
       <p style="font-size:0.9em; color:#aaa;">Waiting for opponent to join / start…</p>
-      <button @click="leaveGame()" class="secondary" style="margin-top:20px;">Leave</button>
+      <button @click="leaveRoom()" class="secondary" style="margin-top:20px;">Leave</button>
     </div>
   </template>
 
@@ -86,7 +93,7 @@
 
           <div class="dungeon-cards">
             <template x-for="(cardStr, idx) in my.dungeon">
-              <button class="dungeon-card" @click="clickCard(idx)" :disabled="state !== 'playing'" >
+              <button class="dungeon-card" @click="clickCard(idx)" :disabled="state !== 'playing'">
                 <img :src="cardImage(cardStr)">
               </button>
             </template>
