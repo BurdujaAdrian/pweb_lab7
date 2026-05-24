@@ -5,8 +5,12 @@ info:
   description: |
     Multiplayer card game server. Players create/join rooms, start games, and submit turn actions.
 
-    JWT auth is currently disabled server-side (`AUTH = false`). When enabled, most endpoints
-    require a Bearer token obtained from `POST /token`.
+    JWT auth is enabled server-side (`AUTH = true`). Most endpoints require a Bearer token
+    obtained from `POST /token`.
+
+    Token verification checks `role`, `name`, and `id` fields in the JWT claims. The `id` field
+    must match the room ID for endpoints that operate on a specific room (e.g. `/game/start`,
+    `POST /game`, `PATCH /room/{guest}/{id}`).
 
 servers:
   - url: http://localhost:8080
@@ -57,7 +61,7 @@ paths:
     get:
       tags: [Room]
       summary: List all open rooms
-      description: Returns all rooms not yet started. Requires VIEWER or ADMIN role when AUTH is enabled.
+      description: Returns all rooms not yet started. Requires VIEWER or ADMIN role.
       security:
         - bearerAuth: []
       responses:
@@ -108,7 +112,7 @@ paths:
   /room/{id}:
     get:
       tags: [Room]
-      summary: Get a room by ID
+      description: Get a room by ID. Requires a JWT token with HOST or GUEST role matching the player's name and the room ID, or ADMIN role.
       security:
         - bearerAuth: []
       parameters:
@@ -231,10 +235,13 @@ paths:
       summary: Start / join a started game (long-poll)
       description: |
         Both HOST and GUEST must call this endpoint. The call blocks until the other
-        player connects (30-second timeout). Once both are connected the game state
+        player connects (5-minute timeout). Once both are connected the game state
         is initialised and returned.
 
         The HOST's call also moves the room from the lobby into the started-rooms store.
+
+        Requires a JWT token with `role` matching the path role, `name` matching the
+        player's name in the room, and `id` matching the room ID.
       security:
         - bearerAuth: []
       parameters:
@@ -271,17 +278,54 @@ paths:
           description: Room was closed while waiting
 
   /game/{role}/{room_id}:
+    get:
+      tags: [Game]
+      summary: Get current game state (no long-poll)
+      description: |
+        Returns the current game state for the player immediately without waiting for any opponent action.
+        Requires a JWT token with `role`, `name`, and `id` (room ID) matching the player's credentials.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: role
+          in: path
+          required: true
+          schema:
+            type: string
+            enum: [HOST, GUEST]
+        - name: room_id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Current game state
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TurnResult"
+        "400":
+          description: Invalid room ID or role
+        "401":
+          description: Missing or invalid token
+        "403":
+          description: Forbidden
+        "404":
+          description: Game not found
     post:
       tags: [Game]
       summary: Submit a turn action (long-poll)
       description: |
         Submit the player's action for this turn. The call blocks until the opponent
-        also submits their action (30-second timeout), then returns both players'
+        also submits their action (5-minute timeout), then returns both players'
         updated game states.
 
         If `ran` is `true` the player runs away from the dungeon — the dungeon cards
         are reshuffled into the deck and four new cards are drawn. No combat occurs
         and the response is returned immediately without waiting for the opponent.
+
+        Requires a JWT token with `role`, `name`, and `id` (room ID) matching the player's credentials.
       security:
         - bearerAuth: []
       parameters:
@@ -317,6 +361,8 @@ paths:
           description: Forbidden (invalid role or running away twice in a row)
         "404":
           description: Room not found
+        "417":
+          description: Action failed (clicked card index out of bounds); room is closed
         "429":
           description: Action sent before previous turn was resolved
         "504":
@@ -355,6 +401,25 @@ paths:
           description: Forbidden
         "404":
           description: Game not found
+
+  /logs:
+    get:
+      tags: [Health]
+      summary: Get server logs
+      description: Returns the full server log buffer as plain text. Requires ADMIN role.
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Log buffer
+          content:
+            text/plain:
+              schema:
+                type: string
+        "401":
+          description: Missing or invalid token
+        "403":
+          description: Not an admin
 
   /health:
     get:
@@ -409,6 +474,10 @@ components:
           $ref: "#/components/schemas/OpGameRepr"
         action_result:
           $ref: "#/components/schemas/ActionResult"
+        game_outcome:
+          type: string
+          enum: [GAME_ON, YOU_WIN, YOU_LOSE, TIE]
+          description: Outcome of the game after this turn
 
     GameRepr:
       type: object
@@ -439,7 +508,7 @@ components:
           description: Current four dungeon cards (e.g. ["clubs5", "spadesA", ...])
         hp:
           type: integer
-          description: Player hit points (max 20)
+          description: Player hit points (max 40)
 
     OpGameRepr:
       type: object
