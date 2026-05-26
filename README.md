@@ -16,8 +16,8 @@ Each turn, a room of four face‑up cards is dealt.
 - **Weapons (♦ diamonds)** – Equip to block damage. A weapon can only block monsters weaker than the last one it blocked.  
 - **Potions (♥ hearts)** – Restore HP equal to their value, up to 20. Only one potion per room.
 
-Players take turns revealing cards from their shared dungeon (the deck).  
-The last player standing with HP > 0 when the deck runs out wins.  
+Players take turns revealing cards from each of their dungeon (the deck).  
+The player who's HP drops bellow 0 loses. If neither player has any cards left to play in the dungeon, the player with the most HP wins.
 You can run away once per room – but not twice in a row!
 
 ![Game Board](images/board.png)
@@ -39,11 +39,11 @@ You can run away once per room – but not twice in a row!
 ## 🚀 Quick Start (local)
 
 ### Prerequisites
-- [Go 1.26+](https://go.dev/dl/) (uses extended `new` syntax)
+- [Go 1.26+](https://go.dev/dl/)
 - A modern web browser
 
 ### Run the server
 
 ```bash
 cd server
-go run .
+go run
